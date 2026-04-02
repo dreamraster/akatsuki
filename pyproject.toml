@@ -1,0 +1,64 @@
+[tool.poetry]
+name            = "akatsuki"
+version         = "0.0.3"
+description     = "[ohmai]"
+authors         = ["venkatesh.sc <venkatesh.sc@gmail.com>"]
+
+[tool.poetry.dependencies]
+python          = ">3.11,<3.14"
+safetensors     = "^0.5.3"
+numpy           = "^2.4.2"
+accelerate      = "^1.6.0"
+huggingface_hub = "^1.7.0"
+xformers        = "^0.0.33.post1"
+mergekit        = "^0.1.4"
+peft            = "^0.18.1"
+bitsandbytes    = "^0.46.1"
+vllm            = "^0.17.0"
+
+# Locals.
+unsloth         = "^2026.3.4"       # D:/cache/_core_/simhan/unsloth
+transformers    = "^5.3.0"          # D:/cache/_core_/simhan/transformers
+diffusers       = "^0.37.0"         # D:/cache/_core_/simhan/diffusers"
+trl             = "^0.20.0"         # D:/cache/_core_/simhan/trl"
+
+
+[tool.poetry.group.dev.dependencies]
+toml = "^0.10.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# Only here as reference. Always use requirement_*.txt for CUDA related wheels.
+# [[tool.poetry.source]]
+# name = "pytorch-cuda"
+# url = "https://download.pytorch.org/whl/cu130"
+# priority = "explicit"
+# 
+# [[tool.poetry.source]]
+# name = "pytorch-rocm"
+# url = "https://download.pytorch.org/whl/rocm6.4"
+# priority = "explicit"
+# 
+# torch = [
+#     # Linux CUDA
+#     { url = "https://download.pytorch.org/whl/cu130/torch-2.9.0%2Bcu130-cp314-cp314-manylinux_2_28_x86_64.whl", platform = "linux", optional = true, markers = "extra == 'cuda'" },
+#     # Linux ROCm — NOTE: cp314 wheels not yet published; downgrade to cp312 or use a source build
+#     { url = "https://download.pytorch.org/whl/rocm6.4/torch-2.9.0%2Brocm6.4-cp314-cp314-manylinux_2_28_x86_64.whl", platform = "linux", optional = true, markers = "extra == 'rocm'" },
+#     # Windows CUDA
+#     { url = "https://download.pytorch.org/whl/cu130/torch-2.9.0%2Bcu130-cp314-cp314-win_amd64.whl", platform = "windows", optional = true, markers = "extra == 'cuda'" },
+# ]
+# 
+# torchvision = [
+#     # Linux CUDA
+#     { url = "https://download.pytorch.org/whl/cu130/torchvision-0.24.0%2Bcu130-cp314-cp314-manylinux_2_28_x86_64.whl", optional = true, platform = "linux", markers = "extra == 'cuda'" },
+#     # Linux ROCm — same Python version caveat as torch above
+#     { url = "https://download.pytorch.org/whl/rocm6.4/torchvision-0.24.0%2Brocm6.4-cp314-cp314-manylinux_2_28_x86_64.whl", optional = true, platform = "linux", markers = "extra == 'rocm'" },
+#     # Windows CUDA
+#     { url = "https://download.pytorch.org/whl/cu130/torchvision-0.24.0%2Bcu130-cp314-cp314-win_amd64.whl", optional = true, platform = "windows", markers = "extra == 'cuda'" },
+# ]
+# 
+# [tool.poetry.extras]
+# cuda  = ["torch", "torchvision"]
+# rocm  = ["torch", "torchvision"]
