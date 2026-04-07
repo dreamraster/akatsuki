@@ -85,6 +85,7 @@ def load_sft_adapter(model, sft_dir: str):
 def run_sft(model, tokenizer, dataset, args, sft_dir: str,
             sft_checkpoint: str | None):
     from trl import SFTTrainer, SFTConfig
+    from unsloth.chat_templates import train_on_responses_only
     """Run the SFT formatting warm-up on a small subset of the dataset.
 
     Builds a 'text' column via apply_chat_template and trains SFTTrainer.
@@ -104,27 +105,30 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
         return
 
     def tokenize_sft(x):
-        resp = x.get("full_response", "")
-
-        if cfg.REASONING_START in str(resp) and cfg.SOLUTION_START in str(resp):
-            target = resp
-        elif "<think>" in str(resp) and "</think>" in str(resp):
-            thought = str(resp).split("<think>")[1].split("</think>")[0]
-            tail    = str(resp).split("</think>")[1].strip()
-            target  = (
-                f"{cfg.REASONING_START}{thought}{cfg.REASONING_END}"
-                f"{cfg.SOLUTION_START}{tail}{cfg.SOLUTION_END}"
-            )
+        # If --qwen_jack is active, use the raw response (already normalized in data.py)
+        if cfg.QWEN_JACK:
+            target = x.get("full_response", "")
         else:
-            target = (
-                f"{cfg.REASONING_START}Thinking...{cfg.REASONING_END}"
-                f"{cfg.SOLUTION_START}{x['completion']}{cfg.SOLUTION_END}"
-            )
+            resp = x.get("full_response", "")
+            if cfg.REASONING_START in str(resp) and cfg.SOLUTION_START in str(resp):
+                target = resp
+            elif "<think>" in str(resp) and "</think>" in str(resp):
+                thought = str(resp).split("<think>")[1].split("</think>")[0]
+                tail    = str(resp).split("</think>")[1].strip()
+                target  = (
+                    f"{cfg.REASONING_START}{thought}{cfg.REASONING_END}"
+                    f"{cfg.SOLUTION_START}{tail}{cfg.SOLUTION_END}"
+                )
+            else:
+                target = (
+                    f"{cfg.REASONING_START}Thinking...{cfg.REASONING_END}"
+                    f"{cfg.SOLUTION_START}{x['completion']}{cfg.SOLUTION_END}"
+                )
 
-        # The chat template prepends REASONING_START to every assistant turn —
-        # strip it here to avoid doubling.
-        if target.startswith(cfg.REASONING_START):
-            target = target[len(cfg.REASONING_START):]
+            # The chat template prepends REASONING_START to every assistant turn —
+            # strip it here to avoid doubling.
+            if target.startswith(cfg.REASONING_START):
+                target = target[len(cfg.REASONING_START):]
 
         # Normalise raw_messages: HF Arrow may return dict-of-lists
         raw = x["raw_messages"]
@@ -174,7 +178,7 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
     sft_dataset = sft_dataset.select_columns(["text"])
 
     # ── Train ─────────────────────────────────────────────────────────────
-    logger.info("📈 Step 1: SFT warm-up (%d examples) ...", len(sft_dataset))
+    logger.info("�� Step 1: SFT warm-up (%d examples) ...", len(sft_dataset))
 
     trainer = SFTTrainer(
         model            = model,
@@ -194,6 +198,22 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
 
     if sft_checkpoint:
         logger.info("▶️  Resuming SFT from %s", sft_checkpoint)
+
+    if cfg.QWEN_JACK:
+        trainer = train_on_responses_only(
+            trainer,
+            instruction_part = "<|im_start|>user\n",
+            response_part = "<|im_start|>assistant\n<think>",
+        )
+
+    if cfg.QWEN_JACK:
+        logger.info("Tokenization (QWEN_JACK):")
+        logger.info(tokenizer.decode(trainer.train_dataset[0]["input_ids"]))
+    # trainer.train(resume_from_checkpoint=sft_checkpoint)
+    # trainer.save_model(sft_dir)
+
+    # model.save_pretrained(sft_dir)  # Local saving
+    # tokenizer.save_pretrained(sft_dir)
 
     trainer.train(resume_from_checkpoint=sft_checkpoint)
     trainer.save_model(sft_dir)
@@ -263,7 +283,7 @@ def run_grpo(model, tokenizer, dataset, reward_funcs: list, args,
       2. trainer.args patched after GRPOTrainer.__init__
       3. Passed directly to trainer.train()
     """
-    logger.info(f"🎯 Step 2: GRPO RL ({args.domain}) ...")
+    logger.info(f"�� Step 2: GRPO RL ({args.domain}) ...")
 
     # TRL ≥ 0.14 added steps_per_generation (default non-None in some builds).
     # prepare_peft_model() internally calls dataclasses.replace(args,
@@ -309,7 +329,7 @@ def run_grpo(model, tokenizer, dataset, reward_funcs: list, args,
 
     if grpo_checkpoint:
         grpo_config.resume_from_checkpoint = grpo_checkpoint
-        logger.info(f"📌 GRPO resume checkpoint: {grpo_checkpoint}")
+        logger.info(f"�� GRPO resume checkpoint: {grpo_checkpoint}")
 
     with _grpo_config_compat():
         trainer = GRPOTrainer(

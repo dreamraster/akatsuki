@@ -20,13 +20,20 @@ logger = logging.getLogger(__name__)
 
 
 def setup_chat_template(tokenizer):
-    """Install a custom Jinja2 chat template that:
-    - Puts the system message first, followed by eos_token
-    - Emits REASONING_START at the start of every assistant turn (and as the
-      generation prompt) so the prompt prefix tokenises identically whether
-      add_generation_prompt is True or False — this is what silences the
-      SFTTrainer tokenisation-mismatch warning.
+    """Install a chat template.
+    If --qwen_jack is enabled, uses the standard Qwen3-thinking template via Unsloth.
+    Otherwise, uses the custom Jinja2 template with REASONING_START tags.
     """
+    # We can check the tags to decide, or just rely on the template if we had a flag.
+    # Since I'm adding the flag to config.py, let's use it.
+    if getattr(cfg, "QWEN_JACK", False):
+        from unsloth.chat_templates import get_chat_template
+        tokenizer = get_chat_template(
+            tokenizer,
+            chat_template="qwen3-thinking",
+        )
+        return tokenizer
+
     chat_template = (
         "{% if messages[0]['role'] == 'system' %}"
         "{{ messages[0]['content'] + eos_token }}"
@@ -62,8 +69,21 @@ def load_and_preprocess_dataset(paths: list[str], tokenizer,
       prompt        — rendered string (add_generation_prompt=True), ready for GRPOTrainer
       raw_messages  — [system, user] message list, kept for SFT apply_chat_template
       completion    — ground-truth answer extracted from the response
-      full_response — original response text (kept for SFT formatting step)
+      full_response — original response text (normalised to <think> if --qwen_jack)
     """
+    import re
+    def _strip(x): return (x or "").strip()
+    think_re = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
+
+    def normalize_assistant(text: str) -> str:
+        text = _strip(text)
+        if not text: return "<think></think>\n"
+        m = think_re.search(text)
+        if m:
+            think_block = m.group(0).strip()
+            rest = text[m.end():].lstrip()
+            return f"{think_block}\n{rest}".rstrip() if rest else f"{think_block}\n"
+        return f"<think></think>\n{text}".rstrip()
     all_datasets = []
     for p in paths:
         p = str(p).strip()
@@ -111,6 +131,10 @@ def load_and_preprocess_dataset(paths: list[str], tokenizer,
                           x.get("answer",
                           x.get("solution", ""))))
 
+        # ── Normalise response format ──────────────────────────────────────
+        if getattr(cfg, "QWEN_JACK", False):
+            response = normalize_assistant(response)
+
         # ── Extract ground-truth answer for reward functions ──────────────
         answer = response
         if "<think>" in str(response) and "</think>" in str(response):
@@ -121,9 +145,6 @@ def load_and_preprocess_dataset(paths: list[str], tokenizer,
             answer = str(response).split("####")[-1].strip()
 
         # ── Render prompt string for GRPOTrainer ──────────────────────────
-        # GRPOTrainer requires a plain str in the "prompt" column.
-        # We also keep raw_messages so the SFT step can append the assistant
-        # turn and call apply_chat_template on a consistent messages list.
         raw_messages = [
             {"role": "system", "content": cfg.SYSTEM_PROMPT},
             {"role": "user",   "content": instruction},

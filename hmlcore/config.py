@@ -14,6 +14,7 @@ REASONING_END   = "</reasoning>"
 SOLUTION_START  = "<solution>"
 SOLUTION_END    = "</solution>"
 SYSTEM_PROMPT   = ""   # populated by apply_args() after CLI parsing
+QWEN_JACK       = False
 
 
 def get_system_prompt(r_start: str, r_end: str, s_start: str, s_end: str) -> str:
@@ -48,6 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable_sft", action="store_true", help="Skip the SFT formatting warm-up stage")
     parser.add_argument("--use_vllm", action="store_false", help="Enable vLLM for fast GRPO generation")
     parser.add_argument("--resume", action="store_true", help="Resume from the last checkpoint")
+    parser.add_argument("--qwen_jack", action="store_true",
+                        help="Enable dataset preparation and training configuration aligned with the Qwopus notebook "
+                             "(Qwen3-thinking templates, think-block normalization, and train_on_responses_only)")
 
     # ── Save / merge ─────────────────────────────────────────────────────────
     parser.add_argument("--merge", action="store_true", help="Merge LoRA adapter into base model before saving")
@@ -136,12 +140,22 @@ def apply_args(args: argparse.Namespace) -> None:
     """Write parsed CLI values back into this module's globals so every other
     module that does ``from hmlcore.config import REASONING_START`` etc. gets the
     user-overridden values after this call."""
-    global REASONING_START, REASONING_END, SOLUTION_START, SOLUTION_END, SYSTEM_PROMPT
+    global REASONING_START, REASONING_END, SOLUTION_START, SOLUTION_END, SYSTEM_PROMPT, QWEN_JACK
+
+    QWEN_JACK = getattr(args, "qwen_jack", False)
 
     REASONING_START = args.r_start
     REASONING_END   = args.r_end
     SOLUTION_START  = args.s_start
     SOLUTION_END    = args.s_end
+
+    # If --qwen_jack is enabled, override default tags to match the notebook's <think> style
+    # unless the user explicitly provided custom tags on the CLI.
+    if getattr(args, "qwen_jack", False):
+        if args.r_start == "<reasoning>": REASONING_START = "<think>"
+        if args.r_end   == "</reasoning>": REASONING_END   = "</think>\n"
+        if args.s_start == "<solution>":  SOLUTION_START  = ""
+        if args.s_end   == "</solution>":  SOLUTION_END    = ""
 
     # Resolve legacy --merge_quantization alias → --quantize
     if getattr(args, "merge_quantization", None) is not None:

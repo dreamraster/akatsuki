@@ -60,6 +60,22 @@ def _extract_thinking(response: str) -> str:
     return ""
 
 
+def _extract_solution(response: str) -> str:
+    """Return the text in the solution block.
+    If SOLUTION_START/END are defined and present, use them.
+    Otherwise, fall back to everything after REASONING_END.
+    """
+    if cfg.SOLUTION_START and cfg.SOLUTION_END:
+        if cfg.SOLUTION_START in response and cfg.SOLUTION_END in response:
+            return response.split(cfg.SOLUTION_START)[1].split(cfg.SOLUTION_END)[0]
+    
+    # Fallback for empty/missing solution tags (e.g. QWEN_JACK mode)
+    if cfg.REASONING_END in response:
+        return response.split(cfg.REASONING_END)[-1].strip()
+        
+    return response.strip()
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Format rewards  (all domains)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -137,9 +153,7 @@ def check_math_units(prompts, completions, **kwargs):
         if not prompt_units:
             scores.append(0.0)
             continue
-        solution = ""
-        if cfg.SOLUTION_START in c and cfg.SOLUTION_END in c:
-            solution = c.split(cfg.SOLUTION_START)[1].split(cfg.SOLUTION_END)[0]
+        solution = _extract_solution(c)
         answer_units = set(_UNIT_RE.findall(solution.lower()))
         if answer_units & prompt_units:   scores.append(1.5)
         elif answer_units:                scores.append(0.5)
@@ -188,10 +202,7 @@ def check_code_heuristic(prompts, completions, **kwargs):
     """Keyword-presence heuristic for code correctness (no LLM needed)."""
     scores = []
     for c in completions:
-        if cfg.SOLUTION_START not in c or cfg.SOLUTION_END not in c:
-            scores.append(-3.0)
-            continue
-        code = c.split(cfg.SOLUTION_START)[1].split(cfg.SOLUTION_END)[0]
+        code = _extract_solution(c)
         score = 0.0
         kw_hits = sum(1 for kw in _CODE_KEYWORDS if kw in code)
         if kw_hits >= 2: score += 2.0
@@ -332,9 +343,7 @@ class LMStudioJudge:
             raw = raw[: -len(cfg.REASONING_START)]
 
         problem  = raw.strip()[-800:]   # cap length for the judge
-        solution = completion
-        if cfg.SOLUTION_START in completion and cfg.SOLUTION_END in completion:
-            solution = completion.split(cfg.SOLUTION_START)[1].split(cfg.SOLUTION_END)[0].strip()
+        solution = _extract_solution(completion)
 
         template = _JUDGE_PROMPT_CODE if domain == "code" else _JUDGE_PROMPT_GENERAL
         messages = [{"role": "user", "content": template.format(
@@ -376,14 +385,7 @@ def _extract_solution_json(completion: str) -> dict | None:
     everything from <solution> to the end of the string.
     """
     try:
-        if cfg.SOLUTION_START not in completion:
-            return None
-            
-        parts = completion.split(cfg.SOLUTION_START)
-        content = parts[1]
-        if cfg.SOLUTION_END in content:
-            content = content.split(cfg.SOLUTION_END)[0]
-            
+        content = _extract_solution(completion)
         content = content.strip()
         return json.loads(content)
     except Exception:
@@ -513,14 +515,14 @@ def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None
             check_math_units,
             check_math_reasoning_quality,
         ]
-        logger.info("📐 Math rewards: correctness + working steps + units + reasoning quality")
+        logger.info("�� Math rewards: correctness + working steps + units + reasoning quality")
 
     elif args.domain == "scene":
         reward_funcs += [
             check_spatial_precision,
             check_scene_connectivity,
         ]
-        logger.info("🎨 Scene rewards: spatial precision + connectivity mapping")
+        logger.info("�� Scene rewards: spatial precision + connectivity mapping")
 
     elif args.domain in ("code", "general"):
         use_judge = (not args.disable_judge) and bool(args.judge_model)
@@ -542,16 +544,16 @@ def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None
 
             reward_funcs.append(_llm_judge)
             logger.info(
-                f"🤖 {args.domain.capitalize()} rewards: LLM judge "
+                f"�� {args.domain.capitalize()} rewards: LLM judge "
                 f"→ {args.judge_url}  model={args.judge_model}"
             )
         else:
             if args.domain == "code":
                 reward_funcs.append(check_code_heuristic)
-                logger.info("🔧 Code rewards: heuristic fallback "
+                logger.info("�� Code rewards: heuristic fallback "
                             "(pass --judge_model to enable LLM judge)")
             else:
-                logger.info("💬 General rewards: format only "
+                logger.info("�� General rewards: format only "
                             "(pass --judge_model to enable LLM judge)")
 
     return reward_funcs, judge
