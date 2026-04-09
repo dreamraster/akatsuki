@@ -30,6 +30,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+import hmlcore.config as cfg
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,7 +123,8 @@ def _compute_expert_output(experts, expert_input, eid):
 
 @torch.no_grad()
 def compute_reap_scores(model, tokenizer, dataset, num_samples=512,
-                        max_cal_length=2048, calibration_strategy="longest"):
+                        max_cal_length=2048, calibration_strategy="longest",
+                        chat_template=False):
     """
     Compute REAP saliency scores for every expert in every MoE layer.
 
@@ -174,6 +176,8 @@ def compute_reap_scores(model, tokenizer, dataset, num_samples=512,
         strategy              = calibration_strategy,
         max_tokens_per_sample = max_cal_length,
         min_tokens_per_sample = 10,
+        tokenizer             = tokenizer,
+        chat_template         = chat_template,
     )
     if not cal_texts:
         logger.error(
@@ -521,11 +525,15 @@ def reap_prune_moe(model, tokenizer, dataset, prune_ratio=0.5,
     Returns:
         The pruned/quantized model (modified in-place).
     """
+    # Always use chat template if it's a chat-aligned model or QWEN_JACK
+    use_chat = getattr(cfg, "QWEN_JACK", False) or (hasattr(tokenizer, "chat_template") and tokenizer.chat_template)
+    
     reap_scores, token_counts, moe_layers = compute_reap_scores(
         model, tokenizer, dataset,
         num_samples           = num_samples,
         max_cal_length        = max_cal_length,
         calibration_strategy  = calibration_strategy,
+        chat_template         = bool(use_chat),
     )
 
     if reap_scores is None:

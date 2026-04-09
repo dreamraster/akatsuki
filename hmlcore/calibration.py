@@ -97,6 +97,8 @@ def build_calibration_samples(
     max_tokens_per_sample: Optional[int] = None,
     min_tokens_per_sample: int = 10,
     seed: int = 42,
+    tokenizer: Optional[object] = None,
+    chat_template: bool = False,
 ) -> List[str]:
     """Select calibration texts from a HuggingFace Dataset.
 
@@ -109,6 +111,9 @@ def build_calibration_samples(
         min_tokens_per_sample: Drop samples shorter than this (default 10).
                                Very short samples contribute no useful signal.
         seed:                  RNG seed for "random" strategy.
+        tokenizer:             Optional HF tokenizer for chat-template rendering.
+        chat_template:         If True, uses tokenizer.apply_chat_template to
+                               format the input.
 
     Returns:
         List of up to num_samples plain-text strings, ordered by strategy.
@@ -123,6 +128,17 @@ def build_calibration_samples(
         if text is None:
             n_no_text += 1
             continue
+
+        if chat_template and tokenizer is not None:
+            # Wrap in actual chat template if requested.
+            # This aligns with how the model sees data during SFT/GRPO.
+            messages = [{"role": "user", "content": text}]
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        elif chat_template:
+            # Fallback to manual ChatML if no tokenizer provided
+            text = f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
 
         est = _estimate_tokens(text)
 

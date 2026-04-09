@@ -55,8 +55,16 @@ def get_format_regex(eos_token: str | None = None) -> re.Pattern:
 
 def _extract_thinking(response: str) -> str:
     """Return the text between REASONING_START and REASONING_END, or ''."""
+    # If the standard tags are found, use them
     if cfg.REASONING_START in response and cfg.REASONING_END in response:
         return response.split(cfg.REASONING_START)[1].split(cfg.REASONING_END)[0]
+    
+    # Robust fallback for QWEN_JACK: prompt ends with <think>, 
+    # so response starts with thinking content and only contains the END tag.
+    if getattr(cfg, "QWEN_JACK", False):
+        if cfg.REASONING_END in response and cfg.REASONING_START not in response:
+            return response.split(cfg.REASONING_END)[0]
+            
     return ""
 
 
