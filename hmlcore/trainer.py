@@ -203,7 +203,7 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
         trainer = train_on_responses_only(
             trainer,
             instruction_part = "<|im_start|>user\n",
-            response_part = "<|im_start|>assistant\n<think>",
+            response_part = "<|im_start|>assistant\n<think>\n",
         )
 
     if cfg.QWEN_JACK:

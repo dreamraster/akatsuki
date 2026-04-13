@@ -64,6 +64,10 @@ def _extract_thinking(response: str) -> str:
     if getattr(cfg, "QWEN_JACK", False):
         if cfg.REASONING_END in response and cfg.REASONING_START not in response:
             return response.split(cfg.REASONING_END)[0]
+        
+        # If the model got stuck and never generated REASONING_END, the entire block is thinking.
+        if cfg.REASONING_START not in response:
+            return response
             
     return ""
 
@@ -81,12 +85,23 @@ def _extract_solution(response: str) -> str:
     if cfg.REASONING_END in response:
         return response.split(cfg.REASONING_END)[-1].strip()
         
-    return response.strip()
+    return ""
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Format rewards  (all domains)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def check_thinking_termination(prompts, completions, **kwargs):
+    """Strict penalty for failing to terminate the thinking block."""
+    scores = []
+    for c in completions:
+        if cfg.REASONING_END in c:
+            scores.append(0.5)
+        else:
+            scores.append(-2.0)
+    return scores
+
 
 def match_format_approximately(prompts, completions, **kwargs):
     """±0.5 per tag — rewards partial tag presence even when structure is wrong."""
@@ -512,7 +527,7 @@ def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None
         return scores
 
     # ── Base rewards (all domains) ────────────────────────────────────────────
-    reward_funcs = [_match_format_exactly, match_format_approximately]
+    reward_funcs = [_match_format_exactly, match_format_approximately, check_thinking_termination]
     judge = None
 
     # ── Domain-specific rewards ───────────────────────────────────────────────
