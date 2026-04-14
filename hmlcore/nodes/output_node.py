@@ -214,7 +214,7 @@ def _safe_save_pretrained(model, tokenizer, save_dir: str) -> None:
     # path (e.g. loaded in float from the start) may still carry the original
     # quantization_config from the HF hub — which would cause convert_hf_to_gguf
     # to raise NotImplementedError: "Quant method is not yet supported: bitsandbytes".
-    _strip_bnb_config(model)
+    _strip_bnb_config(model, save_dir)
 
     # ── Attempt 1: safetensors ────────────────────────────────────────────
     try:
@@ -259,8 +259,8 @@ def _safe_save_pretrained(model, tokenizer, save_dir: str) -> None:
     logger.info("  Saved as pytorch_model.bin via direct torch.save.")
 
 
-def _strip_bnb_config(model) -> None:
-    """Remove BitsAndBytes quantization metadata from model.config.
+def _strip_bnb_config(model, save_dir: str | None = None) -> None:
+    """Remove BitsAndBytes quantization metadata from model.config and on-disk JSON.
 
     After dequantization all weights are plain floats, but model.config still
     carries quantization_config pointing to bitsandbytes.  When the model is
@@ -269,30 +269,65 @@ def _strip_bnb_config(model) -> None:
     raises NotImplementedError because it doesn't know how to unpack BnB from
     a file whose weights are already float.
 
-    Stripping these fields tells every downstream tool (GGUF converters,
-    llama.cpp, Ollama) that the saved checkpoint is a plain float model.
+    This function performs both in-memory surgery and (if save_dir is provided)
+    post-save file surgery to ensure the final directory is 'clean' for GGUF.
     """
     cfg = getattr(model, "config", None)
     if cfg is None:
         return
+        
     _bnb_attrs = (
         "quantization_config",
+        "bitsandbytes",
         "_pre_quantization_dtype",
     )
+    
+    # ── In-Memory Surgery ──────────────────────────────────────────────────
     for attr in _bnb_attrs:
-        if hasattr(cfg, attr) and getattr(cfg, attr) is not None:
-            try:
-                # PretrainedConfig stores extra fields in __dict__ directly;
-                # delattr is the cleanest removal but setattr(None) is the
-                # fallback if the field is a descriptor/property.
+        # Try both direct attribute access and __dict__
+        try:
+            if hasattr(cfg, attr):
                 setattr(cfg, attr, None)
-                logger.info("  Stripped config.%s (model is now plain float).", attr)
-            except Exception:
-                pass
-    # Belt-and-suspenders: also clear from the raw __dict__ if still present
-    if hasattr(cfg, "__dict__"):
-        for attr in _bnb_attrs:
-            cfg.__dict__.pop(attr, None)
+                # For PretrainedConfig, None might still serialise. Try deleting.
+                if hasattr(cfg, "__dict__"):
+                    cfg.__dict__.pop(attr, None)
+        except Exception:
+            pass
+            
+    # Also look inside the attribute_map if it exists
+    attribute_map = getattr(cfg, "attribute_map", {})
+    if attribute_map:
+        for k, v in list(attribute_map.items()):
+            if v in _bnb_attrs:
+                attribute_map.pop(k, None)
+
+    # ── On-Disk Surgery (The Nuclear Option) ──────────────────────────────
+    # If a save_dir is provided, we read the config.json back from disk and 
+    # manually excise any residual BnB blocks. This is the only way to be 
+    # 100% sure that GGUF converters won't see "null" or leftover fields.
+    if save_dir and os.path.isdir(save_dir):
+        config_path = os.path.join(save_dir, "config.json")
+        if os.path.exists(config_path):
+            try:
+                import re
+                with open(config_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                
+                # Remove "quantization_config": { ... } logic
+                # This regex handles nested braces for simple BnB configs
+                content = re.sub(r'"quantization_config":\s*\{[^\}]+\},?', "", content)
+                content = re.sub(r'"quantization_config":\s*null,?', "", content)
+                content = re.sub(r'"_pre_quantization_dtype":\s*"[^"]*",?', "", content)
+                content = re.sub(r'"_pre_quantization_dtype":\s*null,?', "", content)
+                
+                # Clean up any trailing commas before a closing brace
+                content = re.sub(r',\s*\}', '}', content)
+                
+                with open(config_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                logger.debug("  Cleaned config.json surgery complete (removed BnB metadata).")
+            except Exception as exc:
+                logger.warning("  Could not perform config.json surgery: %s", exc)
 
 
 def _dequantize_bnb_model(model, dtype: "torch.dtype"):
@@ -388,7 +423,7 @@ def _peft_merge_save(model, tokenizer, save_dir: str):
     from peft import PeftModel
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    logger.info("🔀 PEFT fallback merge: reloading base model in bf16 to avoid "
+    logger.info("�� PEFT fallback merge: reloading base model in bf16 to avoid "
                 "4-bit dequantisation / RoPE-size errors ...")
 
     # Retrieve base model path from the embedded peft config
@@ -639,7 +674,7 @@ class OutputNode(BaseNode):
         already_merged = getattr(args, "_already_merged", False)
 
         logger.info(
-            "💾 Saving model → %s  (merge=%s, quantize=%s, already_merged=%s)",
+            "�� Saving model → %s  (merge=%s, quantize=%s, already_merged=%s)",
             finale_dir, do_merge, quant, already_merged,
         )
 
@@ -650,7 +685,7 @@ class OutputNode(BaseNode):
         # ── Already-merged path (REAP / ShortGPT pruner output) ─────────────
         if already_merged:
             if use_unsloth and quant in _GGUF_QUANTS and hasattr(model, "save_pretrained_gguf"):
-                logger.info("🔀 Unsloth GGUF export (%s) → %s", quant, finale_dir)
+                logger.info("�� Unsloth GGUF export (%s) → %s", quant, finale_dir)
                 try:
                     model.save_pretrained_gguf(finale_dir, tokenizer,
                                                quantization_method=quant)
@@ -664,13 +699,13 @@ class OutputNode(BaseNode):
                     )
                     _safe_save_pretrained(model, tokenizer, finale_dir)
             else:
-                logger.info("💾 HF save (already merged) → %s", finale_dir)
+                logger.info("�� HF save (already merged) → %s", finale_dir)
                 _safe_save_pretrained(model, tokenizer, finale_dir)
 
         # ── Normal merge path ─────────────────────────────────────────────────
         elif do_merge and use_unsloth:
             if quant in _GGUF_QUANTS and hasattr(model, "save_pretrained_gguf"):
-                logger.info("🔀 Unsloth GGUF export (%s) → %s", quant, finale_dir)
+                logger.info("�� Unsloth GGUF export (%s) → %s", quant, finale_dir)
                 try:
                     model.save_pretrained_gguf(finale_dir, tokenizer,
                                                quantization_method=quant)
@@ -684,7 +719,7 @@ class OutputNode(BaseNode):
                     )
                     stats_model = _peft_merge_save(model, tokenizer, finale_dir)
             else:
-                logger.info("🔀 Unsloth merge (%s) → %s", quant, finale_dir)
+                logger.info("�� Unsloth merge (%s) → %s", quant, finale_dir)
                 try:
                     model.save_pretrained_merged(finale_dir, tokenizer, save_method=quant)
                 except Exception as exc:
@@ -696,15 +731,20 @@ class OutputNode(BaseNode):
                     stats_model = _peft_merge_save(model, tokenizer, finale_dir)
 
         elif do_merge:
-            logger.info("🔀 Standard PEFT merge → %s", finale_dir)
+            logger.info("�� Standard PEFT merge → %s", finale_dir)
             stats_model = model.merge_and_unload()
             stats_model.save_pretrained(finale_dir)
             tokenizer.save_pretrained(finale_dir)
 
         else:
-            logger.info("💾 Saving LoRA adapter only → %s", finale_dir)
+            logger.info("�� Saving LoRA adapter only → %s", finale_dir)
             model.save_pretrained(finale_dir)
             tokenizer.save_pretrained(finale_dir)
+
+        # ── Post-Save Surgery ────────────────────────────────────────────────
+        # Force a clean-up of config.json on disk to remove any BnB metadata
+        # that may have been re-inserted by transformers/peft save hooks.
+        _strip_bnb_config(model, finale_dir)
 
         _log_model_stats(stats_model, tokenizer, finale_dir)
 
@@ -717,4 +757,4 @@ class OutputNode(BaseNode):
             base_quant    = quant if quant in _GGUF_QUANTS else "q8_0"
             _log_dynamic_gguf_guidance(finale_dir, layer_indices, expert_info, base_quant, model=model)
 
-        logger.info("🎉 Model saved → %s", finale_dir)
+        logger.info("�� Model saved → %s", finale_dir)

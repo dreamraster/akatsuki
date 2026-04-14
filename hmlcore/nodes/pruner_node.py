@@ -110,34 +110,36 @@ def _merge_lora_via_bf16_reload(model, tokenizer) -> object:
             torch.cuda.empty_cache()
 
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-
-        # IMPORTANT: load directly onto GPU (not CPU then .cuda()).
-        # Unsloth patches attention with a custom CUDA kernel (apply_qkv) that
-        # it only initialises when the model loads onto a CUDA device.  Loading
-        # to CPU then calling .cuda() moves tensors but never triggers that init,
-        # leaving apply_qkv unset and breaking the calibration forward pass.
         if torch.cuda.is_available():
             device_map = {"": torch.cuda.current_device()}
-            logger.info(
-                "  Reloading base model in %s on GPU:%d ...",
-                dtype, torch.cuda.current_device(),
-            )
         else:
             device_map = "cpu"
-            logger.info("  Reloading base model in %s on CPU ...", dtype)
 
-        # Load WITH the embedded quantization_config intact.
-        # If we strip it, transformers builds a clean bf16 model but then fails
-        # to load the BnB-packed on-disk weights (shape mismatch).  With the
-        # config intact, BnB correctly unpacks the weights.  We then explicitly
-        # dequantize any remaining Linear4bit layers after merge_and_unload().
-        base = AutoModelForCausalLM.from_pretrained(
-            base_model_name,
-            torch_dtype       = dtype,
-            device_map        = device_map,
-            trust_remote_code = True,
-            low_cpu_mem_usage = True,
-        )
+        # Resolve LOADER: Use Unsloth if globally active so that patched architectures
+        # reach their initialized kernel state (apply_qkv, etc.) on the new instance.
+        from hmlcore.model import use_unsloth_backend
+        is_unsloth = use_unsloth_backend()
+        
+        if is_unsloth:
+            from unsloth import FastLanguageModel
+            logger.info("  Reloading base model in %s on GPU via Unsloth ...", dtype)
+            base, _ = FastLanguageModel.from_pretrained(
+                model_name        = base_model_name,
+                max_seq_length    = 8192,  # Doesn't matter for merge but keeps Unsloth happy
+                dtype             = dtype,
+                load_in_4bit      = False, # We want bf16/f16 for merge
+                trust_remote_code = True,
+                device_map        = device_map,
+            )
+        else:
+            logger.info("  Reloading base model in %s on GPU via standard HF ...", dtype)
+            base = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
+                torch_dtype       = dtype,
+                device_map        = device_map,
+                trust_remote_code = True,
+                low_cpu_mem_usage = True,
+            )
 
         logger.info("  Attaching adapter and merging ...")
         merged = PeftModel.from_pretrained(base, tmp_adapter)
@@ -181,7 +183,7 @@ class PrunerNode(BaseNode):
         # when accessed through PEFT's __getattr__ proxy).  Running detection
         # on the PeftModel causes find_decoder_layers to return None, which
         # makes PrunerNode exit early — pruning never runs.
-        logger.info("🔀 Merging LoRA adapter before pruning ...")
+        logger.info("�� Merging LoRA adapter before pruning ...")
 
         quantized = _is_quantized(model)
         if quantized:
@@ -239,7 +241,7 @@ class PrunerNode(BaseNode):
 
         if is_moe:
             logger.info(
-                "🎯 Topology: MoE model — %d expert layer(s) found. "
+                "�� Topology: MoE model — %d expert layer(s) found. "
                 "Using REAP expert pruning.",
                 len(moe_layers),
             )
@@ -293,7 +295,7 @@ class PrunerNode(BaseNode):
         if is_moe:
             from hmlcore.moe import reap_prune_moe
             logger.info(
-                "🔬 REAP: %d samples, strategy=%s, prune_ratio=%.2f%s",
+                "�� REAP: %d samples, strategy=%s, prune_ratio=%.2f%s",
                 calibration_samples, calibration_strategy, prune_ratio,
                 "  [dynamicquant=1-bit]" if dynamicquant else "",
             )

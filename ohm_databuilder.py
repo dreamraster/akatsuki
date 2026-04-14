@@ -1,4 +1,4 @@
-#-- By dreamraster · dreaMSCend
+# By dreamraster · dreaMSCend
 #!/usr/bin/env python3
 """
 Dataset Builder for GRPO Distillation
@@ -483,6 +483,18 @@ def main():
     parser.add_argument("--domain_override", type=str, choices=["math","code","general"],
                         default=None,
                         help="Force all chunks into one domain instead of auto-classifying")
+
+    # ── PRISM ──
+    prism_group = parser.add_argument_group("PRISM Data Selection")
+    prism_group.add_argument("--prism_select", action="store_true", help="Enable PRISM filtering on generated files")
+    prism_group.add_argument("--student_model", type=str, default="Qwen/Qwen3-0.6B",
+                              help="Local student model for PRISM embeddings (default: Qwen/Qwen3-0.6B)")
+    prism_group.add_argument("--prism_tier", type=str, default="high", choices=["high", "mid", "low", "high+mid"],
+                              help="Quality tier to keep (default: 'high')")
+    prism_group.add_argument("--prism_layer", type=int, default=-1, help="Hidden layer for embeddings")
+    prism_group.add_argument("--prism_batch", type=int, default=16, help="Selection batch size")
+    prism_group.add_argument("--prism_chunk", type=int, default=2000, help="Correlation chunk size")
+
     args = parser.parse_args()
 
     # ── Gather all .txt files ──
@@ -559,11 +571,64 @@ def main():
     client.close()
 
     logger.info("━━━ Final counts ━━━")
+    
+    # ── Phase 2: Optional PRISM Filtering ──
+    prism_active = args.prism_select
+    model = None
+    tokenizer = None
+
     for domain in ("math", "code", "general"):
         out = os.path.join(args.output_dir, f"{domain}.jsonl")
-        if os.path.exists(out):
-            lines = sum(1 for _ in open(out))
-            logger.info(f"  {domain:10s}: {lines} examples  →  {out}")
+        if not os.path.exists(out):
+            continue
+            
+        lines_before = sum(1 for _ in open(out, encoding='utf-8'))
+        
+        if prism_active and lines_before > 0:
+            if model is None:
+                logger.info(f"�� PRISM: Loading student model for selection: {args.student_model}")
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                import torch
+                tokenizer = AutoTokenizer.from_pretrained(args.student_model, trust_remote_code=True)
+                model = AutoModelForCausalLM.from_pretrained(
+                    args.student_model,
+                    torch_dtype=torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True
+                )
+                from datasets import Dataset
+                from hmlcore.prism_selector import select_with_prism
+
+            logger.info(f"�� PRISM: Filtering {domain}.jsonl ({lines_before} examples)...")
+            ds = Dataset.from_json(out)
+            # Ensure 'prompt' column exists for PRISM (instruction -> prompt mapping if needed)
+            if "prompt" not in ds.column_names and "instruction" in ds.column_names:
+                ds = ds.rename_column("instruction", "prompt")
+                prompt_renamed = True
+            else:
+                prompt_renamed = False
+
+            ds_filtered = select_with_prism(
+                dataset=ds,
+                model=model,
+                tokenizer=tokenizer,
+                tier=args.prism_tier,
+                layer=args.prism_layer,
+                batch_size=args.prism_batch,
+                chunk_size=args.prism_chunk,
+                cache_path=os.path.join(args.output_dir, f"prism_cache_{domain}.pt")
+            )
+            
+            # Rename back
+            if prompt_renamed:
+                ds_filtered = ds_filtered.rename_column("prompt", "instruction")
+
+            ds_filtered.to_json(out, orient="records", lines=True)
+            lines_after = len(ds_filtered)
+            logger.info(f"  {domain:10s}: {lines_before} → {lines_after} examples (PRISM tier={args.prism_tier})")
+        else:
+            logger.info(f"  {domain:10s}: {lines_before} examples  →  {out}")
+
     logger.info(f"  skipped   : {counters['skipped_no_problem'] + counters['skipped_parse_failed']} "
                 f"(see {args.output_dir}/skipped.jsonl)")
     logger.info("✅ Dataset build complete.")

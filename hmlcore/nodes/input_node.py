@@ -74,7 +74,7 @@ class InputNode(BaseNode):
 
         # ── Model + tokenizer ─────────────────────────────────────────────────
         from hmlcore.model import load_model_and_tokenizer
-        logger.info("📦 Loading model: %s", args.student_model)
+        logger.info("�� Loading model: %s", args.student_model)
         try:
             model, tokenizer, use_unsloth = load_model_and_tokenizer(args)
         except Exception as exc:
@@ -91,7 +91,7 @@ class InputNode(BaseNode):
             or hasattr(getattr(model, "config", None), "vision_config")
         )
         if is_multimodal:
-            logger.info("🎨 Multimodal model detected (%s).", _cls_name)
+            logger.info("�� Multimodal model detected (%s).", _cls_name)
         ctx["is_multimodal"] = is_multimodal
 
         # ── Pre-flight pipeline compatibility report ───────────────────────────
@@ -105,7 +105,7 @@ class InputNode(BaseNode):
 
         # ── Dataset ───────────────────────────────────────────────────────────
         paths = [p.strip() for p in args.datasets.split(",")]
-        logger.info("📂 Loading datasets: %s", paths)
+        logger.info("�� Loading datasets: %s", paths)
         try:
             from hmlcore.data import load_and_preprocess_dataset
             dataset = load_and_preprocess_dataset(
@@ -124,4 +124,35 @@ class InputNode(BaseNode):
             )
 
         logger.info("✅ Dataset ready: %d examples.", len(dataset))
+
+        # ── PRISM Data Selection ──────────────────────────────────────────────
+        if getattr(args, "prism_select", False):
+            from hmlcore.prism_selector import select_with_prism
+            
+            logger.info("�� PRISM: Starting data selection (curating diverse samples) ...")
+            
+            cache_path = args.prism_cache
+            if cache_path is None:
+                cache_path = os.path.join(args.output_dir, "prism_cache.pt")
+                
+            orig_size = len(dataset)
+            dataset = select_with_prism(
+                dataset    = dataset,
+                model      = model,
+                tokenizer  = tokenizer,
+                tier       = args.prism_tier,
+                layer      = args.prism_layer,
+                batch_size = args.prism_batch,
+                cache_path = cache_path,
+                chunk_size = args.prism_chunk,
+            )
+            logger.info("✅ PRISM: Selection complete. Final dataset: %d samples (pruned from %d).", len(dataset), orig_size)
+            
+            if getattr(args, "prism_only", False):
+                output_path = os.path.join(args.output_dir, f"prism_selected_{args.prism_tier}.jsonl")
+                dataset.to_json(output_path, orient="records", lines=True)
+                logger.info("⚡ PRISM_ONLY: Selected dataset saved to %s", output_path)
+                import sys
+                sys.exit(0) # Exit cleanly
+
         ctx["dataset"] = dataset

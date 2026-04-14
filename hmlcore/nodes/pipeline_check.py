@@ -93,12 +93,15 @@ def _do_check(model, tokenizer, args, is_multimodal: bool) -> None:
         want_sft      = want_sft,
         want_grpo     = want_grpo,
         want_prune    = want_prune,
+        want_prism    = getattr(args, "prism_select", False),
         is_moe        = is_moe,
         is_mamba      = is_mamba,
         has_dense     = has_dense_layers,
         is_multimodal = is_multimodal,
         prune_ratio   = getattr(args, "prune_ratio", None),
         dynamicquant  = getattr(args, "dynamicquant", False),
+        prism_tier    = getattr(args, "prism_tier", "high"),
+        prism_layer   = getattr(args, "prism_layer", -1),
     )
 
     # ── Print report ──────────────────────────────────────────────────────────
@@ -128,9 +131,10 @@ def _do_check(model, tokenizer, args, is_multimodal: bool) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _compute_stage_plan(
-    want_sft, want_grpo, want_prune,
+    want_sft, want_grpo, want_prune, want_prism,
     is_moe, is_mamba, has_dense, is_multimodal,
     prune_ratio, dynamicquant=False,
+    prism_tier="high", prism_layer=-1,
 ) -> list[tuple[str, str, str]]:
     """Return list of (stage_name, icon, reason) tuples."""
     plan = []
@@ -169,6 +173,12 @@ def _compute_stage_plan(
     else:
         plan.append(("Pruning", _WARN,
                      "UNKNOWN topology — will attempt at runtime, may skip"))
+
+    # PRISM
+    if want_prism:
+        plan.append(("PRISM", _YES, f"will run  tier={prism_tier}  layer={prism_layer}"))
+    else:
+        plan.append(("PRISM", _NO, "skipped  (pass --prism_select to enable)"))
 
     # Output is always present
     plan.append(("Output", _YES, "will run"))

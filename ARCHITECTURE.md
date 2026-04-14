@@ -23,6 +23,7 @@
 9. [Pruning Algorithms](#9-pruning-algorithms)
    - [REAP — MoE Expert Pruning](#91-reap--moe-expert-pruning)
    - [ShortGPT — Dense Layer Dropping](#92-shortgpt--dense-layer-dropping)
+   - [PRISM — Data Pruning](#93-prism--data-pruning)
 10. [Cross-Cutting Concerns](#10-cross-cutting-concerns)
     - [Pre-flight Compatibility Check](#101-pre-flight-compatibility-check)
     - [Stage Model Snapshots](#102-stage-model-snapshots)
@@ -43,6 +44,7 @@ Akatsuki is a modular pipeline for fine-tuning and compressing language models u
 - **Node-graph pipeline** — each stage is a self-describing node with declared I/O keys; a topological executor wires them together
 - **Two model backends** — Unsloth (fast, 4-bit CUDA) with PEFT fallback (standard BitsAndBytes + LoRA)
 - **Domain-aware rewards** — rule-based math scoring, LLM-judged code/general scoring
+- **Intrinsically diverse data selection** — PRISM engine for pruning redundant samples before training
 - **Post-training pruning** — REAP for MoE architectures, ShortGPT for dense transformers
 - **Resume at any stage** — sentinel files and HF checkpoint detection allow resuming SFT or GRPO mid-run
 
@@ -56,7 +58,7 @@ akatsuki/
 ├── ohm_distiller.py          # Standalone distillation script
 ├── ohm_databuilder.py        # Dataset construction utilities
 ├── ohm_datapreprocessor.py   # Raw data preprocessing
-├── vlm_scene_builder.py      # Synthetic 2D scene dataset generator
+├── vlm_scene_builder.py      # [NEW] Synthetic 2D scene dataset generator
 ├── ARCHITECTURE.md           # This document
 │
 └── hmlcore/                  # Core library
@@ -64,6 +66,7 @@ akatsuki/
     ├── config.py              # CLI argument parser, global prompt tags, apply_args()
     ├── model.py               # Model + tokenizer loading (Unsloth / PEFT)
     ├── data.py                # Dataset loading, schema normalisation, chat template
+    ├── prism_selector.py      # PRISM data selection engine
     ├── trainer.py             # SFT + GRPO training wrappers, checkpoint helpers
     ├── rewards.py             # All reward functions + LMStudioJudge
     ├── moe.py                 # REAP expert pruning for MoE models
@@ -132,6 +135,10 @@ This file is intentionally minimal — all logic lives in `hmlcore`.
 | | `--judge_url` | `localhost:1234` | LM Studio API base URL |
 | | `--judge_timeout` | `60` | Per-request timeout (s) |
 | | `--judge_cache_size` | `2048` | SHA-256 response cache (LRU) |
+| **PRISM** | `--prism_select` | `False` | Enable data pruning |
+| | `--prism_tier` | `high` | Tier to keep (`high` · `mid` · `low`) |
+| | `--prism_layer` | `-1` | Hidden layer to use for embeddings |
+| | `--prism_only` | `False` | Exit after selection and save |
 
 **`apply_args(args)` side-effects:**
 
@@ -217,7 +224,16 @@ Cycle detection: if Kahn's BFS cannot process all nodes (residual in-degree > 0)
 5. Pre-flight check          →  pipeline_check.run_pipeline_check()
 6. Chat template             →  data.setup_chat_template(tokenizer)
 7. Dataset loading           →  data.load_and_preprocess_dataset(...)
+8. PRISM selection           →  prism_selector.select_with_prism() (if enabled)
 ```
+
+**PRISM Selection logic:**
+
+If `--prism_select` is enabled:
+- Hidden states are extracted from the student model (last layer by default).
+- Embeddings are re-centered to remove global semantic drift.
+- Correlation scores are computed; data is split into tiers.
+- If `--prism_only` is set, the filtered dataset is saved and the process exits early.
 
 **Resume logic:**
 
@@ -645,6 +661,25 @@ If ALL samples fail (e.g. unexpected architecture), falls back to index-order pr
 
 ---
 
+### 9.3 PRISM — Data Pruning
+
+**File:** `hmlcore/prism_selector.py`
+**Reference:** "PRISM: Self-Pruning Intrinsic Selection Method" (Knyazev, arXiv 2502.12119)
+
+Unlike REAP/ShortGPT which prune the model, PRISM prunes the **data**. It is used to identify semantically redundant samples that provide diminishing returns during the expensive GRPO phase.
+
+#### Selection Criteria
+
+PRISM ranks samples by a redundancy score $R$, derived from the pairwise correlation of hidden state embeddings. Samples with the lowest $R$ are considered the most "informative" and form the **High Quality** tier.
+
+#### Implementation Detail
+
+- **Implicit Re-centering**: Subtracts the mean embedding vector before correlation to stabilize the signal against feature anisotropy.
+- **Chunked Processing**: The [N, N] correlation matrix is computed in chunks of 2000xN to keep memory usage below 8GB VRAM even for large datasets.
+- **Diverse Seeding**: The output dataset is sorted by redundancy ascending, ensuring that the first samples seen by the SFT trainer are the most semantically diverse seeds.
+
+---
+
 ## 10. Cross-Cutting Concerns
 
 ### 10.1 Pre-flight Compatibility Check
@@ -737,9 +772,10 @@ InputNode
    ├─ load_model_and_tokenizer()  →  4-bit PeftModel + tokenizer
    ├─ run_pipeline_check()        →  compatibility table (stdout)
    ├─ setup_chat_template()       →  custom Jinja2 template installed
-   └─ load_and_preprocess_dataset() → HF Dataset {prompt, raw_messages, completion, full_response}
+   ├─ load_and_preprocess_dataset() → HF Dataset {prompt, raw_messages, completion, full_response}
+   └─ select_with_prism()         →  filters dataset using student hidden states
    │
-   ▼  ctx: model(4bit PeftModel), tokenizer, dataset, use_unsloth, is_multimodal
+   ▼  ctx: model(4bit PeftModel), tokenizer, dataset (PRISM-filtered), use_unsloth, is_multimodal
    │
 SFTNode  (skips if disable_sft / prune_only / grpo_checkpoint)
    ├─ first 100 examples

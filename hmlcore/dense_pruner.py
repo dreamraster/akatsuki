@@ -276,6 +276,11 @@ def _call_layer(
 
     _hint = f"  last_kwargs={list(_last_kwargs.keys()) if _last_kwargs is not None else '[]'}"
     _cause = f"  last_error={type(_last_exc).__name__}: {_last_exc}" if _last_exc else ""
+    
+    # Specific hint for Unsloth-patched models that were reloaded via standard HF
+    if isinstance(_last_exc, AttributeError) and "apply_qkv" in str(_last_exc):
+        _cause += "\n  (HINT: This looks like an Unsloth-patched model missing its CUDA kernels. Ensure the model is reloaded via FastLanguageModel.)"
+
     raise RuntimeError(
         f"Could not call layer {type(layer).__name__} with any known signature.\n"
         f"{_hint}\n{_cause}"

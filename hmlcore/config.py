@@ -126,12 +126,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--judge_cache_size", type=int, default=2048, help="Max cached (prompt, completion) judge scores (default: 2048)")
     parser.add_argument("--disable_judge", action="store_true", help="Disable LLM judge; fall back to heuristic rewards")
 
-    # ── Prompt customisation ──────────────────────────────────────────────────
-    parser.add_argument("--system_prompt", type=str, default=None, help="Override the default system prompt entirely (plain string). " "Use {r_start}/{r_end}/{s_start}/{s_end} as placeholders.")
-    parser.add_argument("--r_start", type=str, default=REASONING_START, help="Reasoning-block open tag")
-    parser.add_argument("--r_end",   type=str, default=REASONING_END, help="Reasoning-block close tag")
-    parser.add_argument("--s_start", type=str, default=SOLUTION_START, help="Solution-block open tag")
-    parser.add_argument("--s_end",   type=str, default=SOLUTION_END, help="Solution-block close tag")
+    # ── PRISM Data Selection ────────────────────────────────────────────────
+    prism_group = parser.add_argument_group("PRISM")
+    prism_group.add_argument("--prism_select", action="store_true", help="Enable PRISM data selection before training")
+    prism_group.add_argument("--prism_tier", type=str, default="high", choices=["high", "mid", "low", "high+mid"],
+                              help="Quality tier to keep (default: 'high'). 'high' is the most unique tier.")
+    prism_group.add_argument("--prism_layer", type=int, default=-1, help="Hidden layer index to pull embeddings from (default: -1)")
+    prism_group.add_argument("--prism_batch", type=int, default=16, help="Batch size for embedding extraction")
+    prism_group.add_argument("--prism_chunk", type=int, default=2000, help="Chunk size for correlation matrix calculation")
+    prism_group.add_argument("--prism_cache", type=str, default=None, help="Path to cache PRISM embeddings")
+    prism_group.add_argument("--prism_only", action="store_true", help="Run PRISM selection and save the result, then exit")
+
+    # ── Reasoning Tags ──────────────────────────────────────────────────────
+    tag_group = parser.add_argument_group("Reasoning Tags")
+    tag_group.add_argument("--r_start", type=str, default="<reasoning>", help="Start tag for reasoning block")
+    tag_group.add_argument("--r_end", type=str, default="</reasoning>", help="End tag for reasoning block")
+    tag_group.add_argument("--s_start", type=str, default="<solution>", help="Start tag for solution block")
+    tag_group.add_argument("--s_end", type=str, default="</solution>", help="End tag for solution block")
+    tag_group.add_argument("--system_prompt", type=str, default=None, help="Custom system prompt (supports {r_start}, {r_end}, etc. placeholders)")
 
     return parser
 
@@ -189,6 +201,12 @@ def apply_args(args: argparse.Namespace) -> None:
             "Add --prune_experts, --prune_only, or --prune_ratio <float>."
         )
         sys.exit(1)
+
+    # --prism_only checks
+    if getattr(args, "prism_only", False):
+        if not getattr(args, "prism_select", False):
+            _log.getLogger(__name__).info("ℹ️ --prism_only detected → enabling --prism_select automatically.")
+        args.prism_select = True
 
     if args.system_prompt:
         SYSTEM_PROMPT = args.system_prompt.format(

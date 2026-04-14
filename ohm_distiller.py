@@ -658,6 +658,12 @@ def run_distillation(
     eval_split: float = 0.1,
     load_in_4bit: bool = True,
     patience: int = 5,
+    # PRISM parameters
+    prism_select: bool = False,
+    prism_tier: str = "high",
+    prism_layer: int = -1,
+    prism_batch: int = 16,
+    prism_chunk: int = 2000,
 ):
     """
     Main distillation pipeline supporting online KD, offline CoT, and CoT fine-tuning.
@@ -716,6 +722,25 @@ def run_distillation(
         )
 
     dataset = load_and_merge_datasets(dataset_paths)
+    
+    # ── Phase 3.5: PRISM Data Selection ──
+    if prism_select:
+        logger.info(f"�� PRISM: Selecting {prism_tier} tier samples...")
+        from hmlcore.prism_selector import select_with_prism
+        # Use a temporary cache path in the output directory
+        cache_path = os.path.join(output_dir, "prism_cache.pt")
+        dataset = select_with_prism(
+            dataset=dataset,
+            model=student_model,
+            tokenizer=tokenizer,
+            tier=prism_tier,
+            layer=prism_layer,
+            batch_size=prism_batch,
+            cache_path=cache_path,
+            chunk_size=prism_chunk,
+        )
+        logger.info(f"✅ PRISM selection complete: {len(dataset)} examples remaining.")
+
     processed = preprocess_dataset(dataset, tokenizer, max_length=max_length)
 
     # Train/eval split
@@ -908,6 +933,15 @@ Examples:
     parser.add_argument("--no_4bit", dest="load_in_4bit", action="store_false", default=True,
                         help="Disable 4-bit quantization for student (uses bf16/fp16 instead)")
 
+    # ── PRISM ──
+    prism_group = parser.add_argument_group("PRISM Data Selection")
+    prism_group.add_argument("--prism_select", action="store_true", help="Enable PRISM data selection before distillation")
+    prism_group.add_argument("--prism_tier", type=str, default="high", choices=["high", "mid", "low", "high+mid"],
+                              help="Quality tier to keep (default: 'high')")
+    prism_group.add_argument("--prism_layer", type=int, default=-1, help="Hidden layer for embeddings")
+    prism_group.add_argument("--prism_batch", type=int, default=16, help="Selection batch size")
+    prism_group.add_argument("--prism_chunk", type=int, default=2000, help="Correlation chunk size")
+
     args = parser.parse_args()
 
     # Parse datasets
@@ -937,6 +971,12 @@ Examples:
         eval_split=args.eval_split,
         load_in_4bit=args.load_in_4bit,
         patience=args.patience,
+        # PRISM
+        prism_select=args.prism_select,
+        prism_tier=args.prism_tier,
+        prism_layer=args.prism_layer,
+        prism_batch=args.prism_batch,
+        prism_chunk=args.prism_chunk,
     )
 
 
