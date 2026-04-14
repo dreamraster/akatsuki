@@ -26,10 +26,10 @@ try:
     from unsloth import FastLanguageModel, PatchFastRL
     PatchFastRL()
     HAS_UNSLOTH = True
-    logger.info("�� Unsloth available and patched.")
+    logger.info("📈 Unsloth available and patched.")
 except ImportError:
     HAS_UNSLOTH = False
-    logger.error("�� Unsloth unavailable.")
+    logger.error("📈 Unsloth unavailable.")
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
@@ -73,7 +73,7 @@ def load_model_and_tokenizer(args):
     use_unsloth = HAS_UNSLOTH and not args.disable_unsloth
 
     if use_unsloth:
-        logger.info("�� Loading model with Unsloth.")
+        logger.info("🚀 Loading model with Unsloth.")
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name          = args.student_model,
             max_seq_length      = args.max_length,
@@ -90,7 +90,7 @@ def load_model_and_tokenizer(args):
             use_gradient_checkpointing = "unsloth",
         )
     else:
-        logger.info("�� Loading model with standard Transformers + PEFT.")
+        logger.info("🐌 Loading model with standard Transformers + PEFT.")
         bnb_config = BitsAndBytesConfig(
             load_in_4bit            = True,
             bnb_4bit_use_double_quant = True,
@@ -143,25 +143,25 @@ def save_model(model, tokenizer, args, use_unsloth: bool):
         quant    = args.merge_quantization
         is_gguf  = quant in ("q8_0", "q4_k_m", "q5_k_m")
         if is_gguf:
-            logger.info(f"�� Unsloth: merging + exporting GGUF ({quant}) → {final_output}")
+            logger.info(f"🔀 Unsloth: merging + exporting GGUF ({quant}) → {final_output}")
             model.save_pretrained_gguf(final_output, tokenizer,
                                        quantization_method=quant)
             logger.info(f"✅ GGUF export complete ({quant}).")
         else:
-            logger.info(f"�� Unsloth: merging adapter → {quant} HF model → {final_output}")
+            logger.info(f"🔀 Unsloth: merging adapter → {quant} HF model → {final_output}")
             model.save_pretrained_merged(final_output, tokenizer, save_method=quant)
             logger.info(f"✅ Unsloth merge complete ({quant}).")
 
     elif args.merge:
-        logger.info("�� Merging LoRA adapter (standard PEFT, bf16) ...")
+        logger.info("🔀 Merging LoRA adapter (standard PEFT, bf16) ...")
         model = model.merge_and_unload()
         model.save_pretrained(final_output)
         tokenizer.save_pretrained(final_output)
         logger.info("✅ Merge complete.")
 
     else:
-        logger.info("�� Saving LoRA adapter only.")
+        logger.info("💾 Saving LoRA adapter only.")
         model.save_pretrained(final_output)
         tokenizer.save_pretrained(final_output)
 
-    logger.info(f"�� Model saved → {final_output}")
+    logger.info(f"🎉 Model saved → {final_output}")

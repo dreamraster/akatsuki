@@ -1,4 +1,4 @@
-> By dreamraster · dreaMSCend
+# By dreamraster Â· dreaMSCend
 """
 hmlcore/prism_selector.py
 =========================

@@ -586,7 +586,7 @@ def main():
         
         if prism_active and lines_before > 0:
             if model is None:
-                logger.info(f"�� PRISM: Loading student model for selection: {args.student_model}")
+                logger.info(f"💎 PRISM: Loading student model for selection: {args.student_model}")
                 from transformers import AutoModelForCausalLM, AutoTokenizer
                 import torch
                 tokenizer = AutoTokenizer.from_pretrained(args.student_model, trust_remote_code=True)
@@ -599,7 +599,7 @@ def main():
                 from datasets import Dataset
                 from hmlcore.prism_selector import select_with_prism
 
-            logger.info(f"�� PRISM: Filtering {domain}.jsonl ({lines_before} examples)...")
+            logger.info(f"💎 PRISM: Filtering {domain}.jsonl ({lines_before} examples)...")
             ds = Dataset.from_json(out)
             # Ensure 'prompt' column exists for PRISM (instruction -> prompt mapping if needed)
             if "prompt" not in ds.column_names and "instruction" in ds.column_names:

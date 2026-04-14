@@ -725,7 +725,7 @@ def run_distillation(
     
     # ── Phase 3.5: PRISM Data Selection ──
     if prism_select:
-        logger.info(f"�� PRISM: Selecting {prism_tier} tier samples...")
+        logger.info(f"💎 PRISM: Selecting {prism_tier} tier samples...")
         from hmlcore.prism_selector import select_with_prism
         # Use a temporary cache path in the output directory
         cache_path = os.path.join(output_dir, "prism_cache.pt")

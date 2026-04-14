@@ -538,14 +538,14 @@ def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None
             check_math_units,
             check_math_reasoning_quality,
         ]
-        logger.info("�� Math rewards: correctness + working steps + units + reasoning quality")
+        logger.info("📐 Math rewards: correctness + working steps + units + reasoning quality")
 
     elif args.domain == "scene":
         reward_funcs += [
             check_spatial_precision,
             check_scene_connectivity,
         ]
-        logger.info("�� Scene rewards: spatial precision + connectivity mapping")
+        logger.info("🎨 Scene rewards: spatial precision + connectivity mapping")
 
     elif args.domain in ("code", "general"):
         use_judge = (not args.disable_judge) and bool(args.judge_model)
@@ -567,16 +567,16 @@ def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None
 
             reward_funcs.append(_llm_judge)
             logger.info(
-                f"�� {args.domain.capitalize()} rewards: LLM judge "
+                f"🤖 {args.domain.capitalize()} rewards: LLM judge "
                 f"→ {args.judge_url}  model={args.judge_model}"
             )
         else:
             if args.domain == "code":
                 reward_funcs.append(check_code_heuristic)
-                logger.info("�� Code rewards: heuristic fallback "
+                logger.info("🔧 Code rewards: heuristic fallback "
                             "(pass --judge_model to enable LLM judge)")
             else:
-                logger.info("�� General rewards: format only "
+                logger.info("💬 General rewards: format only "
                             "(pass --judge_model to enable LLM judge)")
 
     return reward_funcs, judge

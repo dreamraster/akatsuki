@@ -423,7 +423,7 @@ def _peft_merge_save(model, tokenizer, save_dir: str):
     from peft import PeftModel
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    logger.info("�� PEFT fallback merge: reloading base model in bf16 to avoid "
+    logger.info("🔀 PEFT fallback merge: reloading base model in bf16 to avoid "
                 "4-bit dequantisation / RoPE-size errors ...")
 
     # Retrieve base model path from the embedded peft config
@@ -674,7 +674,7 @@ class OutputNode(BaseNode):
         already_merged = getattr(args, "_already_merged", False)
 
         logger.info(
-            "�� Saving model → %s  (merge=%s, quantize=%s, already_merged=%s)",
+            "💾 Saving model → %s  (merge=%s, quantize=%s, already_merged=%s)",
             finale_dir, do_merge, quant, already_merged,
         )
 
@@ -685,7 +685,7 @@ class OutputNode(BaseNode):
         # ── Already-merged path (REAP / ShortGPT pruner output) ─────────────
         if already_merged:
             if use_unsloth and quant in _GGUF_QUANTS and hasattr(model, "save_pretrained_gguf"):
-                logger.info("�� Unsloth GGUF export (%s) → %s", quant, finale_dir)
+                logger.info("🔀 Unsloth GGUF export (%s) → %s", quant, finale_dir)
                 try:
                     model.save_pretrained_gguf(finale_dir, tokenizer,
                                                quantization_method=quant)
@@ -699,13 +699,13 @@ class OutputNode(BaseNode):
                     )
                     _safe_save_pretrained(model, tokenizer, finale_dir)
             else:
-                logger.info("�� HF save (already merged) → %s", finale_dir)
+                logger.info("💾 HF save (already merged) → %s", finale_dir)
                 _safe_save_pretrained(model, tokenizer, finale_dir)
 
         # ── Normal merge path ─────────────────────────────────────────────────
         elif do_merge and use_unsloth:
             if quant in _GGUF_QUANTS and hasattr(model, "save_pretrained_gguf"):
-                logger.info("�� Unsloth GGUF export (%s) → %s", quant, finale_dir)
+                logger.info("🔀 Unsloth GGUF export (%s) → %s", quant, finale_dir)
                 try:
                     model.save_pretrained_gguf(finale_dir, tokenizer,
                                                quantization_method=quant)
@@ -719,7 +719,7 @@ class OutputNode(BaseNode):
                     )
                     stats_model = _peft_merge_save(model, tokenizer, finale_dir)
             else:
-                logger.info("�� Unsloth merge (%s) → %s", quant, finale_dir)
+                logger.info("🔀 Unsloth merge (%s) → %s", quant, finale_dir)
                 try:
                     model.save_pretrained_merged(finale_dir, tokenizer, save_method=quant)
                 except Exception as exc:
@@ -731,13 +731,13 @@ class OutputNode(BaseNode):
                     stats_model = _peft_merge_save(model, tokenizer, finale_dir)
 
         elif do_merge:
-            logger.info("�� Standard PEFT merge → %s", finale_dir)
+            logger.info("🔀 Standard PEFT merge → %s", finale_dir)
             stats_model = model.merge_and_unload()
             stats_model.save_pretrained(finale_dir)
             tokenizer.save_pretrained(finale_dir)
 
         else:
-            logger.info("�� Saving LoRA adapter only → %s", finale_dir)
+            logger.info("💾 Saving LoRA adapter only → %s", finale_dir)
             model.save_pretrained(finale_dir)
             tokenizer.save_pretrained(finale_dir)
 
@@ -757,4 +757,4 @@ class OutputNode(BaseNode):
             base_quant    = quant if quant in _GGUF_QUANTS else "q8_0"
             _log_dynamic_gguf_guidance(finale_dir, layer_indices, expert_info, base_quant, model=model)
 
-        logger.info("�� Model saved → %s", finale_dir)
+        logger.info("🎉 Model saved → %s", finale_dir)

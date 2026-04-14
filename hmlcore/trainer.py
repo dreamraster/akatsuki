@@ -178,7 +178,7 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
     sft_dataset = sft_dataset.select_columns(["text"])
 
     # ── Train ─────────────────────────────────────────────────────────────
-    logger.info("�� Step 1: SFT warm-up (%d examples) ...", len(sft_dataset))
+    logger.info("📈 Step 1: SFT warm-up (%d examples) ...", len(sft_dataset))
 
     trainer = SFTTrainer(
         model            = model,
@@ -283,7 +283,7 @@ def run_grpo(model, tokenizer, dataset, reward_funcs: list, args,
       2. trainer.args patched after GRPOTrainer.__init__
       3. Passed directly to trainer.train()
     """
-    logger.info(f"�� Step 2: GRPO RL ({args.domain}) ...")
+    logger.info(f"🎯 Step 2: GRPO RL ({args.domain}) ...")
 
     # TRL ≥ 0.14 added steps_per_generation (default non-None in some builds).
     # prepare_peft_model() internally calls dataclasses.replace(args,
@@ -329,7 +329,7 @@ def run_grpo(model, tokenizer, dataset, reward_funcs: list, args,
 
     if grpo_checkpoint:
         grpo_config.resume_from_checkpoint = grpo_checkpoint
-        logger.info(f"�� GRPO resume checkpoint: {grpo_checkpoint}")
+        logger.info(f"📌 GRPO resume checkpoint: {grpo_checkpoint}")
 
     with _grpo_config_compat():
         trainer = GRPOTrainer(
