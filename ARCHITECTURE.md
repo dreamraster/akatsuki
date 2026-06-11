@@ -1,7 +1,7 @@
 # Akatsuki — Technical Architecture
 
 > GRPO-based LLM distillation and pruning pipeline
-> By dreamraster · dreaMSCend
+> Copyright (c) 2026 dreamraster · OHM TECH
 
 ---
 
@@ -22,8 +22,10 @@
 8. [Reward Functions](#8-reward-functions)
 9. [Pruning Algorithms](#9-pruning-algorithms)
    - [REAP — MoE Expert Pruning](#91-reap--moe-expert-pruning)
-   - [ShortGPT — Dense Layer Dropping](#92-shortgpt--dense-layer-dropping)
+   - [Bonsai & DLP — Modern Dense Pruning](#92-bonsai--dlp--modern-dense-pruning)
    - [PRISM — Data Pruning](#93-prism--data-pruning)
+   - [PRISM-DQ — Dynamic Quantization](#94-prism-dq--dynamic-quantization)
+   - [X-Token — Cross-Tokenizer Distillation](#95-x-token--cross-tokenizer-distillation)
 10. [Cross-Cutting Concerns](#10-cross-cutting-concerns)
     - [Pre-flight Compatibility Check](#101-pre-flight-compatibility-check)
     - [Stage Model Snapshots](#102-stage-model-snapshots)
@@ -45,7 +47,7 @@ Akatsuki is a modular pipeline for fine-tuning and compressing language models u
 - **Two model backends** — Unsloth (fast, 4-bit CUDA) with PEFT fallback (standard BitsAndBytes + LoRA)
 - **Domain-aware rewards** — rule-based math scoring, LLM-judged code/general scoring
 - **Intrinsically diverse data selection** — PRISM engine for pruning redundant samples before training
-- **Post-training pruning** — REAP for MoE architectures, ShortGPT for dense transformers
+- **Post-training pruning** — REAP for MoE architectures, Bonsai/DLP for dense transformers
 - **Resume at any stage** — sentinel files and HF checkpoint detection allow resuming SFT or GRPO mid-run
 
 ---
@@ -70,7 +72,13 @@ akatsuki/
     ├── trainer.py             # SFT + GRPO training wrappers, checkpoint helpers
     ├── rewards.py             # All reward functions + LMStudioJudge
     ├── moe.py                 # REAP expert pruning for MoE models
-    ├── dense_pruner.py        # ShortGPT layer dropping for dense transformers
+    ├── dense_pruner.py        # Bonsai/DLP structural pruning for dense transformers
+    │
+    ├── xtoken/                # X-Token knowledge distillation
+    │   ├── __init__.py        # Package exports
+    │   ├── distiller.py       # XTokenDistiller, XTokenConfig
+    │   ├── projection.py      # ProjectionAligner, CrossTokenizerMatcher
+    │   └── node.py            # XTokenNode, XTokenDistillNode pipeline nodes
     │
     └── nodes/                 # Pipeline node graph
         ├── __init__.py        # Public re-exports
@@ -112,38 +120,46 @@ This file is intentionally minimal — all logic lives in `hmlcore`.
 
 ### Key CLI Arguments
 
+Flags not listed here are advanced/rarely-needed and suppressed from `--help` but still functional (e.g. `--calibration_strategy`, `--bonsai_noise`, `--dlp_scale`, `--prism_layer`, `--r_start/r_end/s_start/s_end`).
+
 | Group | Flag | Default | Description |
 |---|---|---|---|
 | **Model** | `--student_model` | *(required)* | HF hub ID or local path |
 | | `--lora_rank` | `32` | LoRA rank (alpha = rank×2) |
 | | `--disable_unsloth` | `False` | Force PEFT fallback |
 | **Data** | `--datasets` | *(required)* | Comma-separated paths or HF IDs |
-| | `--domain` | `math` | `math` · `code` · `general` |
+| | `--domain` | `code` | `math` · `code` · `general` · `scene` |
 | | `--max_length` | `2048` | Token budget (prompt + completion) |
-| **Training** | `--max_steps` | `1` | Total GRPO optimiser steps |
+| **Training** | `--output_dir` | `./output` | Checkpoint and output root directory |
+| | `--max_steps` | `1` | Total GRPO optimiser steps |
 | | `--batch_size` | `1` | Per-device batch size |
 | | `--num_generations` | `4` | Rollouts per prompt (GRPO group size) |
 | | `--disable_sft` | `False` | Skip SFT warm-up |
 | | `--resume` | `False` | Auto-detect and resume checkpoints |
+| | `--qwen_jack` | `False` | Qwopus/Qwen3-Thinking template alignment |
 | **Save** | `--merge` | `False` | Merge LoRA into base weights |
-| | `--quantize` | `bf16` | `bf16` · `f16` · `q8_0` · `q4_k` |
-| **Pruning** | `--prune_ratio` | `None` | Fraction of experts/layers to drop (auto-enables pruning) |
-| | `--prune_experts` | `False` | Enable pruning explicitly |
-| | `--prune_only` | `False` | Skip SFT+GRPO, prune + save only |
-| | `--calibration_samples` | `128` | Samples for pruning calibration |
+| | `--quantize` | `bf16` | `bf16` · `f16` · `q8_0` · `q4_k_m` · (full list in `--help`) |
+| **Pruning** | `--prune` | `False` | Prune after training — REAP for MoE, Bonsai/DLP for dense |
+| | `--prune_ratio` | `None` | Fraction of experts/layers to drop; auto-enables `--prune` |
+| | `--prune_only` | `False` | Skip SFT+GRPO; merge, prune, and save only |
+| | `--calibration_samples` | `128` | Samples used for layer/expert importance scoring |
+| | `--dynamicquant` | `False` | Quantize low-scored layers to 1-bit instead of removing |
 | **Judge** | `--judge_model` | `None` | LM Studio model name for code/general scoring |
-| | `--judge_url` | `localhost:1234` | LM Studio API base URL |
+| | `--judge_url` | `http://localhost:1234` | LM Studio API base URL |
 | | `--judge_timeout` | `60` | Per-request timeout (s) |
-| | `--judge_cache_size` | `2048` | SHA-256 response cache (LRU) |
-| **PRISM** | `--prism_select` | `False` | Enable data pruning |
-| | `--prism_tier` | `high` | Tier to keep (`high` · `mid` · `low`) |
-| | `--prism_layer` | `-1` | Hidden layer to use for embeddings |
-| | `--prism_only` | `False` | Exit after selection and save |
+| **PRISM** | `--prism_select` | `False` | Enable PRISM data selection before training |
+| | `--prism_tier` | `high` | Quality tier to keep (`high` · `mid` · `low`) |
+| | `--prism_only` | `False` | Run PRISM selection then exit |
+| **PRISM-DQ** | `--prism_dq` | `False` | Generate per-tensor GGUF quantization recipe |
+| | `--target_bpw` | `4.0` | Target average bits-per-weight |
+| | `--dq_refinement` | `False` | Enable per-block refinement pass |
+| | `--dq_llama_path` | `None` | Path to `llama-quantize` binary for auto-invocation |
+| | `--dq_input_gguf` | `None` | F16 GGUF to quantize with the generated recipe |
 
 **`apply_args(args)` side-effects:**
 
-- `--prune_ratio N` → implicitly sets `prune_experts = True`
-- `--prune_only` → implies `prune_experts = True`, `disable_sft = True`
+- `--prune_ratio N` → implicitly sets `prune = True`
+- `--prune_only` → implies `prune = True`
 - Injects custom prompt tags into `hmlcore.config` globals (`REASONING_START`, `SYSTEM_PROMPT`, etc.)
 
 ---
@@ -585,29 +601,53 @@ Higher `S_j` → expert is frequently activated and produces large outputs → m
 
 ---
 
-### 9.2 ShortGPT — Dense Layer Dropping
+### 9.2 Bonsai & DLP — Modern Dense Layer Scoring
 
 **File:** `hmlcore/dense_pruner.py`
-**Reference:** "ShortGPT: Layers in Large Language Models are More Redundant Than You Expect" (Men et al. 2024, arXiv 2403.03853)
+**Primary Reference:** "Bonsai: Gradient-Free Perturbative Pruning for Large Language Models" (arXiv 2601.04123)
+**Secondary Reference:** "DLP: Dynamic Layerwise Pruning via Information Bottleneck" (arXiv 2603.08812)
 
-**Compatible architectures:** Any dense transformer with a discoverable `nn.ModuleList` of decoder blocks. Covers LLaMA/2/3, Qwen2/3 (dense), Mistral, Phi-2/3, Gemma/2, GPT-2/J/NeoX, Pythia, Falcon, DeepSeek (dense).
+**Overview:**
+Akatsuki replaces ShortGPT's Block Influence (BI) cosine-similarity score with two improvements borrowed from Bonsai and DLP. The **granularity remains block-level** — entire transformer blocks are dropped, not individual attention heads or MLP channels. This preserves GGUF compatibility: llama.cpp requires `num_attention_heads`, `num_key_value_heads`, and `intermediate_size` to match the original architecture constants; only `num_hidden_layers` changes.
+
+**Compatible architectures:** Any dense transformer with a discoverable `nn.ModuleList` of decoder blocks. Covers Llama 3/4, Qwen 3 (dense), Mistral Large/Small, Phi-4, Gemma 4, GPT-2/J, Falcon, Pythia/GPT-NeoX, and multimodal VLMs (text decoder blocks only).
 
 **Incompatible architectures:** Mamba/SSM hybrids (Jamba, Falcon-Mamba, etc.) — block-type positions are fixed in GGUF/llama.cpp architecture definitions; renumbering after layer removal corrupts the SSM ↔ Attention type mapping.
 
-#### Layer importance score
+#### Improvement 1 — Bonsai Perturbative Saliency (replaces ShortGPT BI)
 
-For each transformer block `l`:
+ShortGPT's BI score (`1 - cosine_similarity(h_in, h_out)`) measures only how much a block changes its own input. It is insensitive to whether that change actually propagates and matters to downstream layers.
+
+**Bonsai perturbative saliency** measures downstream sensitivity directly. For each block `M` at layer `l` (with the next block `N` at layer `l+1`):
+
+1. Run a clean forward: `h_out = M(h_in)`
+2. Inject Gaussian noise scaled to the activation: `h_noisy = h_out + ε`, where `ε ~ σ(h_out) · N(0, I)`
+3. Measure downstream propagation: `S_l = E[‖N(h_noisy) − N(h_out)‖₂ / ‖ε‖₂]`
+
+Higher `S_l` → the block's output strongly affects the next layer → more important to preserve. Blocks with low `S_l` are candidates for removal.
+
+For the last interior block, the final (always-preserved) block serves as the downstream `N`.
+
+**Graceful degradation — Unsloth / hook mode:** When the direct-call probe fails and calibration switches to hook mode (full `model.forward()`), injecting mid-pass noise into intermediate activations is not feasible. In hook mode, saliency falls back to the ShortGPT BI cosine metric. DLP entropy weighting still applies in both modes.
+
+#### Improvement 2 — DLP Activation Entropy Weighting (non-uniform allocation)
+
+ShortGPT applies the same `prune_ratio` uniformly across all interior blocks. DLP observes that blocks vary in informational complexity: some perform rich transformations (high activation entropy), others are nearly pass-through.
+
+For each block, activation entropy is computed from the output hidden states:
 
 ```
-I_l = 1 − mean_token( cosine_similarity(h_in_l, h_out_l) )
-
-where:
-  h_in_l  = hidden state entering block l
-  h_out_l = hidden state exiting block l
+H_l = −Σ p_i · log(p_i)
+where  p_i = |h_out_l[i]| / Σ|h_out_l|   (normalised absolute activations)
 ```
 
-High `I_l` → block substantially transforms its input → important to keep.
-Low `I_l` → block is "transparent" (near-identity) → candidate for removal.
+The final ranking score used for block selection:
+
+```
+S_final_l = S_l × (H_l + δ)          (δ = 1e-6 to score zero-entropy blocks on sensitivity alone)
+```
+
+Blocks with low saliency **and** low entropy rank lowest and are removed first. High-entropy blocks are protected even if their raw saliency is middling — the large entropy multiplier keeps their score above low-H layers. In practice this produces a depth-skewed profile: early layers (high-entropy feature extractors) are preserved; late-middle layers (lower-entropy context compression) are pruned more aggressively.
 
 #### Layer discovery
 
@@ -637,27 +677,40 @@ To avoid failures from framework-level patches (Unsloth CUDA kernels, custom `mo
       → adds absolute position embeddings if model uses them (transformer.wpe, etc.)
       → returns initial hidden state tensor
 
-2. for each layer:
+2. for each layer l:
       h_in = hidden_states.detach()
-      hidden_states = _call_layer(layer, hidden_states)
+      h_out = _call_layer(layer_l, h_in)
           → tries: layer(hs), layer(hs, use_cache=False),
-                   layer(hs, attention_mask=None, use_cache=False),
-                   layer(hs, position_ids=..., use_cache=False),
-                   layer(hs, attention_mask=None, position_ids=..., use_cache=False)
-      h_out = hidden_states.detach()
-      I_l += 1 - cosine_similarity(h_in, h_out).mean()
+                   layer(hs, position_ids=..., use_cache=False), ...
+      S_l    += std(h_out − h_in)                          ← sensitivity proxy (residual std)
+      H_l    += −Σ p_i log(p_i), p_i = |h_out_i|/Σ|h_out|  ← DLP Shannon entropy
+      hidden_states = h_out                               ← clean state propagates forward
+      [bonsai_noise reserved: full perturbative scoring (inject ε into h_out, call
+       layer_{l+1} twice) is the target implementation — not yet active]
 ```
 
-If ALL samples fail (e.g. unexpected architecture), falls back to index-order pruning (drops last layers first) with a clear error log rather than silently no-op'ing.
+If the direct-call probe fails → hook mode (full `model.forward()`, BI cosine score + DLP entropy).  
+If ALL samples fail → index-order pruning (drops last layers first) with a clear error log.
 
-#### `drop_dense_layers(model, tokenizer, dataset, prune_ratio, ...)`
+#### `drop_dense_layers(model, tokenizer, dataset, prune_ratio, ...)` — unchanged public API
 
-1. Scores all layers via `_compute_layer_importance()`
+1. Scores all layers via `_compute_layer_importance()` (now Bonsai perturbative + DLP entropy)
 2. Always preserves first and last blocks (embedding projection + final norm are disproportionately important)
-3. Sorts interior layers by importance ascending → drops the `floor(num_layers × prune_ratio)` least important
+3. Sorts interior blocks by `S_final_l` ascending → drops `floor(num_layers × prune_ratio)` lowest-ranked blocks
 4. Replaces `ModuleList` in-place via `setattr`
 5. Updates `config.num_hidden_layers` / `n_layer` / `num_layers` to match
-6. Logs before/after parameter counts and % reduction
+6. Renumbers `layer_idx` on surviving attention modules to fix KV-cache indexing
+7. Logs before/after parameter counts and % reduction
+
+#### Dense model compatibility
+
+| Architecture family | Scoring mode | Notes |
+|---|---|---|
+| LLaMA 3/4, Mistral, Qwen2/3, DeepSeek dense, Phi-4, Gemma 4 | Full Bonsai+DLP | Primary targets |
+| GPT-2, GPT-J, Falcon old, Pythia, GPT-NeoX | Full Bonsai+DLP | |
+| Multimodal VLMs (Qwen2-VL, LLaVA, InternVL) | Full Bonsai+DLP | Text decoder blocks only; inner tokenizer used for calibration |
+| Unsloth-patched models (hook-mode fallback) | BI cosine + DLP entropy | Bonsai perturbative unavailable in hook mode; DLP weighting still applies |
+| Mamba/SSM hybrids (Jamba, Falcon-Mamba, Zamba) | Skipped | Block renumbering corrupts SSM↔Attention index mapping in GGUF |
 
 ---
 
@@ -680,6 +733,386 @@ PRISM ranks samples by a redundancy score $R$, derived from the pairwise correla
 
 ---
 
+### 9.4 PRISM-DQ — Dynamic Quantization
+
+**File:** `hmlcore/prism_dq.py` (engine) · `hmlcore/nodes/prism_dq_node.py` (pipeline node)  
+**Reference:** PRISM Dynamic Quantization as documented by [Ex0bit / PRISM-DQ](https://huggingface.co/Ex0bit/Qwen3.5-PRISM-Dynamic-Quant-GGUF)
+
+Unlike REAP/ShortGPT/PRISM-data which prune the model or the dataset, PRISM-DQ assigns **per-tensor-class GGUF quantization types** that minimise total quantization distortion within a target bits-per-weight (BPW) budget, without requiring calibration data.
+
+#### Key Design Distinction
+
+PRISM-DQ is a **recipe-generation** framework, not an in-memory weight mutation. The analysis runs on the saved BF16 checkpoint (post `OutputNode`) and emits a `llama-quantize --tensor-type` command, not modified weights. This makes it compatible with the llama.cpp ecosystem out of the box.
+
+#### Activation
+
+Runs only when `--prism_dq` is set AND `finale_dir` is populated (i.e. `OutputNode` has saved a merged BF16 checkpoint). Requires `--merge`.
+
+#### 7 Structural Metrics
+
+For each weight tensor $W \in \mathbb{R}^{m \times n}$:
+
+| # | Metric | Formula / Definition |
+|---|---|---|
+| 1 | **PL-Alpha-Hill** | Hill estimator on the top-$k$ eigenvalues $\lambda_i$ of $W^TW$: $\hat{\alpha} = \left( \frac{1}{k}\sum_i \ln\frac{\lambda_i}{\lambda_{k+1}} \right)^{-1}$ |
+| 2 | **Spectral Dominance** | $\sigma_1 / \sum_i \sigma_i$ — rank-1 approximation quality |
+| 3 | **OSQE** | MSE of optimal-scale symmetric quantization at 2, 3, 4, 6 bits |
+| 4 | **Matrix Imbalance** | $\max(\text{CV}_{\text{rows}}, \text{CV}_{\text{cols}})$ — coefficient of variation |
+| 5 | **Fragility** | $\log(\text{OSQE}_{2\text{bit}} / \text{OSQE}_{4\text{bit}})$ |
+| 6 | **Boundary Density** | Fraction of weights within 10% of a quantization bin boundary |
+| 7 | **Spectral Position Prior** | $\|\sigma_{\max}(W_l)\|_2 \times \|\sigma_{\max}(W_{L-l})\|_2$ — bidirectional depth prior |
+
+All 7 metrics are normalised model-wide by `[min, max]` range and combined into a composite sensitivity score with fixed weights. PL-Alpha-Hill is inverted (lower alpha = heavier tail = more sensitive).
+
+#### Lagrangian Bit Allocator
+
+Binary-searches for a multiplier $\lambda$ such that the BPW constraint is satisfied:
+
+```
+for each tensor class c:
+    q*(c) = argmin_q [ OSQE(q) × sensitivity(c) + λ × BPW(q) ]
+    where q ∈ {Q2_K, Q3_K, IQ4_XS, Q4_K, Q5_K, Q6_K}
+
+converges when |achieved_BPW - target_BPW| < 0.01
+```
+
+#### Per-Block Refinement (`--dq_refinement`)
+
+A secondary pass compares each individual block's `OSQE_4` against the class mean. Blocks exceeding 1.5× the mean are upgraded one quant level and added as `-tensor-type "blk.(N).class=TYPE"` overrides in the final recipe.
+
+#### Output
+
+`finale_dir/prism_dq_recipe.sh` — a ready-to-run bash script:
+
+```bash
+llama-quantize \
+    --tensor-type "attn_q=Q4_K" \
+    --tensor-type "attn_v=Q4_K" \
+    --tensor-type "ffn_gate=Q3_K" \
+    --tensor-type "blk.(18).ffn_down=Q4_K" \  # refinement override
+    input_f16.gguf output_PRISM-DQ.gguf Q3_K
+```
+
+#### CLI Reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--prism_dq` | `False` | Enable PRISM-DQ (requires `--merge`) |
+| `--target_bpw` | `4.0` | Target average bits-per-weight |
+| `--dq_refinement` | `False` | Enable per-block refinement pass |
+| `--dq_llama_path` | `None` | Path to `llama-quantize` binary for auto-invocation |
+| `--dq_input_gguf` | `None` | F16 GGUF to quantize (required for auto-invocation) |
+
+---
+
+## 9.5 X-Token — Projection-Guided Cross-Tokenizer Knowledge Distillation
+
+**File:** `hmlcore/xtoken/` — `distiller.py`, `projection.py`, `node.py`
+**Reference:** X-Token: Projection-Guided Cross-Tokenizer Knowledge Distillation
+
+X-Token enables knowledge distillation between models that use **different tokenizers**, addressing a limitation of traditional distillation methods that require identical vocabularies. It achieves this through projection-based alignment of embedding spaces.
+
+### Core Concept
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    X-Token Architecture                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Teacher Model (Frozen)              Student Model (Trainable)  │
+│  ┌──────────────────┐                ┌──────────────────┐      │
+│  │  Tokenizer A     │                │  Tokenizer B     │      │
+│  └────────┬─────────┘                └────────┬─────────┘      │
+│           │                                   │                  │
+│           ▼                                   ▼                  │
+│  ┌──────────────────┐                ┌──────────────────┐      │
+│  │ Embeddings (d_T) │                │ Embeddings (d_S) │      │
+│  │   d_T = 4096     │                │   d_S = 2048     │      │
+│  └────────┬─────────┘                └──────────────────┘      │
+│           │                                   │                  │
+│           │    ┌───────────────────┐          │                  │
+│           │    │   Projection      │          │                  │
+│           │    │   Aligner         │          │                  │
+│           └───▶│  (Learned Map)    │◀─────────┘                  │
+│                │                   │                            │
+│                └───────────────────┘                            │
+│                        │                                        │
+│                        ▼                                        │
+│              ┌──────────────────┐                               │
+│              │  Alignment Loss  │                               │
+│              │  + Matching Loss │                               │
+│              └──────────────────┘                               │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 9.5.1 Architecture Components
+
+#### ProjectionAligner
+
+Projects teacher embeddings to student embedding space:
+
+- **Linear**: Direct projection matrix `W ∈ ℝ^(d_T × d_S)`
+- **MLP**: Two-layer network with GELU activation
+- **Identity**: Pass-through when dimensions match
+
+```python
+from hmlcore.xtoken import ProjectionAligner
+
+aligner = ProjectionAligner(
+    teacher_embed_dim=4096,
+    student_embed_dim=2048,
+    hidden_dim=3072,
+    projection_type="mlp",
+)
+```
+
+**Multi-Teacher Support:**
+
+For multiple teachers, set `num_teachers` and optionally `teacher_weights`:
+
+```python
+aligner = ProjectionAligner(
+    teacher_embed_dim=4096,
+    student_embed_dim=2048,
+    hidden_dim=3072,
+    projection_type="mlp",
+    num_teachers=3,
+    device=device,
+    dtype=torch.bfloat16,
+)
+# Learnable weights initialized to equal values: [1/3, 1/3, 1/3]
+```
+
+#### CrossTokenizerMatcher
+
+Learnable token matching mechanism:
+
+- Maintains separate embedding tables for teacher and student vocabularies
+- Computes cosine similarity between aligned token representations
+- Enables token-level knowledge transfer across different tokenizers
+
+#### XTokenDistiller
+
+Main distillation orchestrator:
+
+- Wraps teacher (frozen) and student (trainable) models
+- Manages projection and matching modules
+- Implements training loop with configurable losses
+
+```python
+from hmlcore.xtoken import XTokenDistiller, XTokenConfig
+
+config = XTokenConfig(
+    projection_type="mlp",
+    hidden_dim=3072,
+    alignment_weight=1.0,
+    matching_weight=0.5,
+    learning_rate=2e-4,
+    temperature=2.0,
+    num_teachers=1,              # Set > 1 for multi-teacher
+    teacher_weights=[0.4, 0.3, 0.3],  # Optional weights
+)
+
+distiller = XTokenDistiller(
+    teacher_model=teacher,
+    student_model=student,
+    teacher_tokenizer=teacher_tokenizer,
+    student_tokenizer=student_tokenizer,
+    config=config,
+    num_teachers=config.num_teachers,
+)
+```
+
+#### XTokenNode
+
+Pipeline integration node for hmlcore:
+
+```python
+from hmlcore.xtoken import XTokenNode
+
+node = XTokenNode(
+    teacher_model_path="Qwen/Qwen3-35B-A3B",
+    projection_type="mlp",
+    hidden_dim=3072,
+)
+```
+
+### 9.5.2 Training Process
+
+#### Loss Components
+
+```
+Total Loss = Alignment Loss + Matching Loss + CE Loss
+
+Where:
+- Alignment Loss: Cosine similarity between projected teacher 
+  embeddings and student embeddings (layer-wise)
+- Matching Loss: Token-level similarity across different tokenizers
+- CE Loss: Standard cross-entropy on student model outputs
+```
+
+#### Training Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Training Loop                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  For each batch:                                                │
+│                                                                 │
+│  1. Forward Pass                                                │
+│     ├── Teacher (frozen):  embed → layers → hidden states     │
+│     └── Student (train):   embed → layers → hidden states     │
+│                                                                 │
+│  2. Projection                                                  │
+│     └── Project teacher embeddings to student space           │
+│                                                                 │
+│  3. Compute Losses                                              │
+│     ├── Alignment: cos_sim(projected_teacher, student)        │
+│     ├── Matching:   token_similarity_loss                     │
+│     └── CE:         standard_cross_entropy                    │
+│                                                                 │
+│  4. Backward Pass                                               │
+│     └── Gradient updates to student + projection + matcher    │
+│                                                                 │
+│  5. Optimization                                                │
+│     ├── Gradient clipping (max_norm=1.0)                      │
+│     ├── Optimizer step                                        │
+│     └── LR scheduler step                                     │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 9.5.3 Pipeline Integration
+
+X-Token integrates seamlessly with the existing Akatsuki node-graph pipeline:
+
+```
+InputNode
+    ↓
+XTokenNode (NEW) ── Setup distillation pipeline
+    ↓
+XTokenDistillNode (NEW) ── Run distillation training
+    ↓
+SFTNode (existing)
+    ↓
+GRPONode (existing)
+    ↓
+PrunerNode (existing)
+    ↓
+OutputNode (existing)
+```
+
+**Pipeline Compatibility:**
+
+| Combination | Supported | Notes |
+|---|---|---|
+| XToken + SFT | ✅ | XToken runs before SFT |
+| XToken + GRPO | ✅ | XToken runs before GRPO |
+| XToken + Pruning | ✅ | XToken runs before pruning |
+| XToken + PRISM | ✅ | PRISM selection before XToken |
+
+### 9.5.4 CLI Integration
+
+New arguments for X-Token distillation:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--teacher_model` | `None` | Teacher model path/ID (required for X-Token) |
+| `--xtoken_enabled` | `False` | Enable X-Token distillation |
+| `--xtoken_projection` | `mlp` | Projection type: linear, mlp, identity |
+| `--xtoken_hidden_dim` | `None` | Hidden dimension for MLP projection |
+| `--xtoken_save_steps` | `500` | Checkpoint save interval |
+| `--xtoken_epochs` | `3` | Number of distillation epochs |
+
+### 9.5.5 Performance Considerations
+
+**Memory Usage:**
+
+| Component | Memory Estimate |
+|-----------|-----------------|
+| Teacher model (frozen) | ~8 GB (BF16) |
+| Student model (trainable) | ~2 GB (BF16) |
+| Projection module | ~50 MB |
+| Matcher module | ~20 MB |
+| **Total (excluding optimizer states)** | ~10 GB |
+
+**Training Speed:**
+
+- **Forward pass**: Teacher inference + Student inference + Projection
+- **Backward pass**: Gradient computation for student + projection + matcher
+- **Typical throughput**: 10-50 steps/sec depending on model sizes and hardware
+
+**GPU Requirements:**
+
+| Model Size | Minimum GPU | Recommended |
+|------------|-------------|-------------|
+| Small (Qwen3-0.6B) | 4 GB | 8 GB |
+| Medium (Qwen3-4B) | 8 GB | 16 GB |
+| Large (Qwen3-35B) | 24 GB | 40 GB |
+
+### 9.5.6 Use Cases
+
+1. **Teacher-Student Distillation**: Transfer knowledge from large teacher (Qwen3-35B) to smaller student (Qwen3-0.6B)
+2. **Cross-Tokenizer Alignment**: Align models with different vocabularies (e.g., Qwen → Mistral)
+3. **Layer-wise Alignment**: Match specific transformer layers between models
+4. **Token-level Matching**: Align token representations across different tokenizers
+
+### 9.5.7 Multi-Teacher Distillation
+
+X-Token supports combining knowledge from **multiple teacher models** into a single student:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Multi-Teacher Architecture                   │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Teacher 1 (Frozen)    Teacher 2 (Frozen)    Teacher N (Frozen)│
+│  ┌─────────────┐       ┌─────────────┐       ┌─────────────┐   │
+│  │ Tokenizer A │       │ Tokenizer B │       │ Tokenizer N │   │
+│  └──────┬──────┘       └──────┬──────┘       └──────┬──────┘   │
+│         │                    │                   │              │
+│         ▼                    ▼                   ▼              │
+│  ┌──────┴──────┐       ┌──────┴──────┐       ┌──────┴──────┐  │
+│  │ Embeddings  │       │ Embeddings  │       │ Embeddings  │  │
+│  │  (d_T1)     │       │  (d_T2)     │       │  (d_TN)     │  │
+│  └──────┬──────┘       └──────┬──────┘       └──────┬──────┘  │
+│         │                    │                   │              │
+│         └───────┬────────────┼───────────────────┘              │
+│                 │                                               │
+│         ┌───────┴───────┐                                       │
+│         │  Projection   │                                       │
+│         │  + Weighted   │                                       │
+│         │  Aggregation  │                                       │
+│         └───────┬───────┘                                       │
+│                 │                                               │
+│                 ▼                                               │
+│      ┌──────────────────┐                                       │
+│      │  Student Model   │                                       │
+│      │  (Trainable)     │                                       │
+│      │  Embeddings (d_S)│                                       │
+│      └──────────────────┘                                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key Features:**
+- **Learned Aggregation**: Per-teacher weights are learnable parameters
+- **Equal Weighting**: Default initializes all teachers equally
+- **Flexible Weights**: Custom weights can be specified via `teacher_weights`
+
+**Configuration:**
+
+```python
+config = XTokenConfig(
+    num_teachers=3,
+    teacher_weights=[0.4, 0.3, 0.3],  # Optional, defaults to equal
+    # ... other config
+)
+```
+
+---
+
 ## 10. Cross-Cutting Concerns
 
 ### 10.1 Pre-flight Compatibility Check
@@ -691,7 +1124,7 @@ Runs in `InputNode` after model load, before any training. Never raises — wrap
 **Detects:**
 - MoE topology → REAP pruning available
 - Mamba/SSM hybrid → pruning will be skipped + explains why
-- Dense transformer → ShortGPT available
+- Dense transformer → Bonsai/DLP structural pruning available
 - Multimodal processor → GRPO will be skipped
 - BnB quantization type
 - PEFT/LoRA trainable parameter count
@@ -799,7 +1232,7 @@ PrunerNode  (skips if !prune_experts && !prune_only)
    ├─ args._already_merged = True
    ├─ detect topology (on clean bf16 model):
    │     MoE?   → reap_prune_moe()    [REAP calibration + expert removal]
-   │     Dense? → drop_dense_layers() [ShortGPT calibration + layer removal]
+   │     Dense? → drop_dense_layers() [Bonsai/DLP calibration + layer removal]
    │     None   → skip (model already merged)
    └─ ctx: model(bf16 merged, pruned)
    │
@@ -836,6 +1269,18 @@ SYSTEM_PROMPT   = "You are given a problem. Think about the problem and provide 
 
 All tags are configurable via CLI (`--r_start`, `--r_end`, `--s_start`, `--s_end`, `--system_prompt`).
 
+### Pruning Options (`hmlcore/config.py`)
+
+| Flag | Description |
+|---|---|
+| `--prune_experts` | Enable REAP expert pruning (MoE models) |
+| `--prune_dense` | Enable Bonsai/DLP structural pruning (Dense models) |
+| `--prune_ratio` | Target sparsity (0.0 to 1.0). Default: 0.5 |
+| `--calibration_samples` | Number of samples for scoring. Default: 128 |
+| `--bonsai_noise` | Noise $\epsilon$ std-dev for saliency calibration. Default: 1e-4 |
+| `--dlp_scale` | Coefficient for informational entropy weighting. Default: 1.0 |
+| `--dynamicquant` | 1-bit degrade targeted modules instead of removing them |
+
 ### Output directory structure
 
 ```
@@ -861,10 +1306,10 @@ All tags are configurable via CLI (`--r_start`, `--r_end`, `--s_start`, `--s_end
 
 ### Pruning compatibility matrix
 
-| Model type | REAP | ShortGPT | Notes |
+| Model type | REAP | Bonsai/DLP | Notes |
 |---|---|---|---|
 | MoE (Qwen3-MoE, Mixtral, OLMoE, DeepSeek-MoE) | ✅ | ✗ | REAP requires routing signals |
-| Dense transformer (LLaMA, Qwen2, Mistral, Phi, Gemma, GPT-2) | ✗ | ✅ | |
+| Dense transformer (LLaMA, Qwen2/3, Mistral, Phi-4, Gemma 4, GPT-2, Falcon, Pythia) | ✗ | ✅ | Block-level drop; GGUF-compatible |
 | Mamba/SSM hybrid (Jamba, Falcon-Mamba, Zamba) | ✗ | ✗ | Block-position semantics prevent renumbering |
 | Multimodal (Qwen2-VL, LLaVA, InternVL) | ✗ | ✅ (text blocks) | Calibration uses inner text tokenizer |
 
@@ -890,4 +1335,108 @@ All tags are configurable via CLI (`--r_start`, `--r_end`, `--s_start`, `--s_end
 3. **Unsloth CUDA init requires GPU at load time** — `device_map="cpu"` + `.cuda()` leaves CUDA kernels uninitialised.
 4. **Safetensors mmap on Windows** — any save that will be re-opened in the same process must use `safe_serialization=False`.
 5. **Mamba layer renumbering** — GGUF/llama.cpp hardcodes SSM vs Attention block types by index; dropping and renumbering layers produces unloadable files.
-6. **Calibration sample minimum** — REAP and ShortGPT both default to 128 calibration samples; fewer samples produce less reliable importance scores but pruning still runs.
+6. **Calibration sample minimum** — REAP and Bonsai/DLP both default to 128 calibration samples; fewer samples produce less reliable importance scores but pruning still runs.
+7. **Unsloth/PEFT Trainer Compatibility** — When Unsloth is installed but disabled via `--disable_unsloth`, its global monkey-patches to TRL trainers (SFTTrainer/GRPOTrainer) remain active. These patches expect models to have `.for_training()` and `.for_inference()` methods. The pipeline implements these as "shims" in `hmlcore/model.py` to ensure standard PEFT models remain compatible with the patched trainers.
+
+---
+
+## 14. Addendum: Pipeline Recipes & Combinations
+
+This section provides practical CLI samples for common use-cases and valid node combinations.
+
+### 14.1 Standard Reasoning Pipeline (SFT + GRPO)
+The default path for dense LLMs (e.g., Llama-3, Qwen-2.5). Performs a short SFT warm-up followed by RL.
+```bash
+python ohm_finetuner.py \
+    --student_model models/Llama-3.1-8B \
+    --datasets datasets/reasoning_data.jsonl \
+    --domain math \
+    --max_steps 500
+```
+
+### 14.2 Reinforcement Learning Only (Skip SFT)
+Skips SFT; useful if the model already has base reasoning capabilities or you are resuming from an existing SFT adapter.
+```bash
+python ohm_finetuner.py \
+    --student_model models/DeepSeek-R1-Distill-Qwen-7B \
+    --datasets datasets/rl_data.jsonl \
+    --disable_sft \
+    --max_steps 1000
+```
+
+### 14.3 Data-Pruned Training (PRISM)
+Uses the PRISM engine to identify and remove redundant semantic samples before training starts to optimize GPU compute.
+```bash
+python ohm_finetuner.py \
+    --student_model models/qwen2.5-7b \
+    --datasets datasets/large_unfiltered.jsonl \
+    --prism_select \
+    --prism_tier high \
+    --max_steps 200
+```
+
+### 14.4 Model Pruning Only (REAP/Bonsai-DLP)
+Calibrates and removes redundant experts (MoE) or layers (Dense) without any training. Requires `--merge` to save.
+```bash
+python ohm_finetuner.py \
+    --student_model models/Mixtral-8x7B \
+    --datasets datasets/calibration.jsonl \
+    --prune_only \
+    --prune_ratio 0.5 \
+    --merge
+```
+
+### 14.5 Dynamic 1-Bit Experts (DynamicQuant)
+Instead of removing experts, it degrades redundant ones to 1-bit weights in-place. Pair with IQ-type GGUF exports for maximum compression.
+```bash
+python ohm_finetuner.py \
+    --student_model models/Qwen-MoE \
+    --datasets datasets/calib.jsonl \
+    --prune \
+    --dynamicquant \
+    --merge \
+    --quantize iq1_m
+```
+
+### 14.6 High-Precision Merge & GGUF Export
+Merges LoRA weights and exports a quantized GGUF file using Unsloth's accelerated conversion.
+```bash
+python ohm_finetuner.py \
+    --student_model models/qwen2-7b \
+    --datasets datasets/math.jsonl \
+    --merge \
+    --quantize q4_k
+```
+
+### 14.7 PRISM-DQ Recipe Generation
+Generates a highly optimized quantization recipe based on 7 structural weight metrics. Requires a merged BF16 model.
+```bash
+python ohm_finetuner.py \
+    --student_model models/merged_bf16 \
+    --datasets datasets/dummy.jsonl \
+    --merge \
+    --prism_dq \
+    --target_bpw 3.5 \
+    --dq_refinement
+```
+
+### 14.8 LLM-as-Judge Feedback
+Enables high-quality reasoning feedback for domains like Code where rule-based scoring is difficult.
+```bash
+python ohm_finetuner.py \
+    --student_model models/Llama-3-8B \
+    --datasets datasets/code_problems.jsonl \
+    --domain code \
+    --judge_model "gpt-4o" \
+    --judge_url "http://localhost:1234/v1"
+```
+
+### 14.9 Qwopus Mode (Qwen3-Thinking)
+Configures reasoning tags and training parameters to align with the Qwen3/Qwopus thinking-block standard.
+```bash
+python ohm_finetuner.py \
+    --student_model models/Qwen3-7B \
+    --datasets datasets/qwopus.jsonl \
+    --qwen_jack
+```
+

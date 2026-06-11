@@ -1,5 +1,4 @@
 # By dreamraster · dreaMSCend
-#!/usr/bin/env python3
 """
 Merge LoRA adapter weights into base model.
 
@@ -237,14 +236,14 @@ def test_models(
 
     logger.info("\n--- Test Summary ---")
     if lora_result.strip() == merged_result.strip():
-        logger.info("✅ SUCCESS: LoRA model and Merged model outputs MATCH perfectly!")
+        logger.info("âœ… SUCCESS: LoRA model and Merged model outputs MATCH perfectly!")
     else:
-        logger.warning("❌ WARNING: LoRA model and Merged model outputs DO NOT match!")
+        logger.warning("âŒ WARNING: LoRA model and Merged model outputs DO NOT match!")
     
     if lora_result.strip() != base_result.strip():
-        logger.info("✅ SUCCESS: LoRA altered the base model's behavior (outputs differ).")
+        logger.info("âœ… SUCCESS: LoRA altered the base model's behavior (outputs differ).")
     else:
-        logger.warning("⚠️ NOTICE: LoRA output is identical to base output. The adapter might not have learned enough, or the test prompt naturally elicits the same response.")
+        logger.warning("âš ï¸ NOTICE: LoRA output is identical to base output. The adapter might not have learned enough, or the test prompt naturally elicits the same response.")
 
 
 def main():

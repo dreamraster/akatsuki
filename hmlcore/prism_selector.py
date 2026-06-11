@@ -1,4 +1,4 @@
-# By dreamraster Â· dreaMSCend
+# By dreamraster · dreaMSCend
 """
 hmlcore/prism_selector.py
 =========================
@@ -152,18 +152,24 @@ def _extract_embeddings(dataset, model, tokenizer, layer, batch_size):
         f"for {len(dataset)} samples on {device}..."
     )
     
+    # For VLM processors (e.g. Qwen3VLProcessor), calling the full processor
+    # with plain text triggers load_image() on the prompt string. Use the inner
+    # text tokenizer directly to avoid this.
+    text_tok = getattr(tokenizer, "tokenizer", tokenizer)
+    max_len = min(getattr(text_tok, "model_max_length", 4096), 4096)
+
     for i in tqdm(range(0, len(dataset), batch_size), desc="PRISM Extraction"):
         batch = dataset.select(range(i, min(i + batch_size, len(dataset))))
-        
+
         # Use the 'prompt' column as per plan
         prompts = [x["prompt"] for x in batch]
-        
-        inputs = tokenizer(
+
+        inputs = text_tok(
             prompts,
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=tokenizer.model_max_length
+            max_length=max_len,
         ).to(device)
         
         with torch.no_grad():

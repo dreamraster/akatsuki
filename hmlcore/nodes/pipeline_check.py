@@ -21,10 +21,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Visual markers
-_YES  = "✅"
+_YES = "✅"
 _WARN = "⚠️ "
-_NO   = "❌"
-_SEP  = "━" * 62
+_NO = "❌"
+_SEP = "━" * 62
 
 
 def run_pipeline_check(model, tokenizer, args, is_multimodal: bool) -> None:
@@ -41,6 +41,7 @@ def run_pipeline_check(model, tokenizer, args, is_multimodal: bool) -> None:
 # Internal analysis
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _do_check(model, tokenizer, args, is_multimodal: bool) -> None:
     cls_name = type(model).__name__
 
@@ -48,10 +49,10 @@ def _do_check(model, tokenizer, args, is_multimodal: bool) -> None:
     quant_label = _detect_quant(model)
 
     # ── Topology ─────────────────────────────────────────────────────────────
-    is_moe, num_moe_layers        = _check_moe(model)
-    is_mamba, mamba_attr          = _check_mamba(model)
-    has_dense_layers, num_dense   = _check_dense(model)
-    is_vlm                        = _check_vlm(model, tokenizer, is_multimodal)
+    is_moe, num_moe_layers = _check_moe(model)
+    is_mamba, mamba_attr = _check_mamba(model)
+    has_dense_layers, num_dense = _check_dense(model)
+    is_vlm = _check_vlm(model, tokenizer, is_multimodal)
 
     # ── Resolve topology label ────────────────────────────────────────────────
     topo_parts = []
@@ -74,34 +75,35 @@ def _do_check(model, tokenizer, args, is_multimodal: bool) -> None:
     )
 
     # ── Param count ───────────────────────────────────────────────────────────
-    total_params     = sum(p.numel() for p in model.parameters())
+    total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     # ── Library versions ──────────────────────────────────────────────────────
     lib_versions = _get_lib_versions()
 
     # ── Stage decisions ───────────────────────────────────────────────────────
-    want_sft   = not getattr(args, "disable_sft",  False)
-    want_grpo  = not getattr(args, "disable_grpo", False)
+    want_sft = not getattr(args, "disable_sft", False)
+    want_grpo = not getattr(args, "disable_grpo", False)
     want_prune = (
         getattr(args, "prune_experts", False)
-        or getattr(args, "prune_only",   False)
-        or getattr(args, "prune_ratio",  None) is not None
+        or getattr(args, "prune_only", False)
+        or getattr(args, "prune_ratio", None) is not None
     )
 
     stages = _compute_stage_plan(
-        want_sft      = want_sft,
-        want_grpo     = want_grpo,
-        want_prune    = want_prune,
-        want_prism    = getattr(args, "prism_select", False),
-        is_moe        = is_moe,
-        is_mamba      = is_mamba,
-        has_dense     = has_dense_layers,
-        is_multimodal = is_multimodal,
-        prune_ratio   = getattr(args, "prune_ratio", None),
-        dynamicquant  = getattr(args, "dynamicquant", False),
-        prism_tier    = getattr(args, "prism_tier", "high"),
-        prism_layer   = getattr(args, "prism_layer", -1),
+        want_sft=want_sft,
+        want_grpo=want_grpo,
+        want_prune=want_prune,
+        want_prism=getattr(args, "prism_select", False),
+        is_moe=is_moe,
+        is_mamba=is_mamba,
+        has_dense=has_dense_layers,
+        is_multimodal=is_multimodal,
+        force_grpo=getattr(args, "force_grpo", False),
+        prune_ratio=getattr(args, "prune_ratio", None),
+        dynamicquant=getattr(args, "dynamicquant", False),
+        prism_tier=getattr(args, "prism_tier", "high"),
+        prism_layer=getattr(args, "prism_layer", -1),
     )
 
     # ── Print report ──────────────────────────────────────────────────────────
@@ -111,8 +113,11 @@ def _do_check(model, tokenizer, args, is_multimodal: bool) -> None:
     logger.info("  Model:       %s", cls_name)
     logger.info("  Topology:    %s", topo_label)
     logger.info("  Tokenizer:   %s", tok_label)
-    logger.info("  Params:      %s total  |  %s trainable (LoRA/PEFT)",
-                f"{total_params:,}", f"{trainable_params:,}")
+    logger.info(
+        "  Params:      %s total  |  %s trainable (LoRA/PEFT)",
+        f"{total_params:,}",
+        f"{trainable_params:,}",
+    )
     logger.info("  Precision:   %s", quant_label)
     logger.info("  Libraries:   %s", lib_versions)
     logger.info(_SEP)
@@ -130,11 +135,21 @@ def _do_check(model, tokenizer, args, is_multimodal: bool) -> None:
 # Stage planning
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _compute_stage_plan(
-    want_sft, want_grpo, want_prune, want_prism,
-    is_moe, is_mamba, has_dense, is_multimodal,
-    prune_ratio, dynamicquant=False,
-    prism_tier="high", prism_layer=-1,
+    want_sft,
+    want_grpo,
+    want_prune,
+    want_prism,
+    is_moe,
+    is_mamba,
+    has_dense,
+    is_multimodal,
+    force_grpo=False,
+    prune_ratio=None,
+    dynamicquant=False,
+    prism_tier="high",
+    prism_layer=-1,
 ) -> list[tuple[str, str, str]]:
     """Return list of (stage_name, icon, reason) tuples."""
     plan = []
@@ -149,34 +164,43 @@ def _compute_stage_plan(
     if not want_grpo:
         plan.append(("GRPO", _NO, "skipped  (--disable_grpo)"))
     elif is_multimodal:
-        plan.append(("GRPO", _YES, "will run (multimodal rollout)"))
+        plan.append(("GRPO", _YES, "will run (using 3D-RoPE collapse guard fallback images)"))
     else:
         plan.append(("GRPO", _YES, "will run"))
 
     # Pruning
     _dq = "  [dynamicquant: 1-bit degrade instead of remove]" if dynamicquant else ""
     if not want_prune:
-        plan.append(("Pruning", _NO,
-                     "skipped  — pass --prune_ratio <0.0–1.0> to enable"))
+        plan.append(
+            ("Pruning", _NO, "skipped  (pass --prune_ratio <0.0–1.0> to enable)")
+        )
     elif is_moe:
         ratio_str = f"  ratio={prune_ratio}" if prune_ratio is not None else ""
-        plan.append(("Pruning", _YES,
-                     f"REAP expert pruning (MoE){ratio_str}{_dq}"))
+        plan.append(("Pruning", _YES, f"REAP expert pruning (MoE){ratio_str}{_dq}"))
     elif is_mamba:
-        plan.append(("Pruning", _NO,
-                     "skipped  — Mamba/SSM hybrid: layer renumbering would break "
-                     "GGUF block-type mapping in llama.cpp"))
+        plan.append(
+            (
+                "Pruning",
+                _NO,
+                "skipped  — Mamba/SSM hybrid: layer renumbering would break "
+                "GGUF block-type mapping in llama.cpp",
+            )
+        )
     elif has_dense:
         ratio_str = f"  ratio={prune_ratio}" if prune_ratio is not None else ""
-        plan.append(("Pruning", _YES,
-                     f"ShortGPT layer dropping (dense transformer){ratio_str}{_dq}"))
+        plan.append(
+            ("Pruning", _YES, f"Bonsai/DLP structural pruning (Dense){ratio_str}{_dq}")
+        )
     else:
-        plan.append(("Pruning", _WARN,
-                     "UNKNOWN topology — will attempt at runtime, may skip"))
+        plan.append(
+            ("Pruning", _WARN, "UNKNOWN topology — will attempt at runtime, may skip")
+        )
 
     # PRISM
     if want_prism:
-        plan.append(("PRISM", _YES, f"will run  tier={prism_tier}  layer={prism_layer}"))
+        plan.append(
+            ("PRISM", _YES, f"will run  tier={prism_tier}  layer={prism_layer}")
+        )
     else:
         plan.append(("PRISM", _NO, "skipped  (pass --prism_select to enable)"))
 
@@ -190,26 +214,78 @@ def _compute_stage_plan(
 # Architecture detectors
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _check_moe(model) -> tuple[bool, int]:
     try:
         from hmlcore.moe import find_moe_layers
+
         layers = find_moe_layers(model)
         return len(layers) > 0, len(layers)
     except Exception:
         return False, 0
 
 
-_SSM_ATTRS = frozenset({
-    "ssm_conv1d", "dt_proj", "A_log", "x_proj",
-    "dt_layernorm", "q_layernorm", "mixer", "conv1d",
-})
+_SSM_ATTRS = frozenset(
+    {
+        "ssm_conv1d",
+        "dt_proj",
+        "A_log",
+        "x_proj",
+        "dt_layernorm",
+        "q_layernorm",
+        "mixer",
+        "conv1d",
+    }
+)
+
+# Structural signatures for Mamba/SSM: at least 2 of these patterns must appear
+# in a block's immediate children for a structural match.
+_SSM_STRUCTURE_SIGNS = frozenset(
+    {
+        "_conv1d",
+        "_dt_proj",
+        "_dt",  # conv + time-projection layers
+        "_A_log",
+        "_A",  # state-space (A) parameter
+        "_x_proj",
+        "_proj",  # projection layer
+        "_norm",  # layer normalization (not batch)
+        "_conv",  # generic conv
+        "_mixer",  # Mamba mixer wrapper
+    }
+)
+
+
+def _has_ssm_structure(layer) -> bool:
+    """Return True if a decoder layer has a structural Mamba signature.
+
+    Instead of matching exact attribute names (which break when custom models
+    rename layers), this checks for the *presence of SSM-relevant submodules*
+    using substring matching on module names.  At least 2 of the known patterns
+    must be found for a positive match.
+    """
+    signs_found = 0
+    for name, _ in layer.named_modules():
+        leaf = name.split(".")[-1].lower()
+        for sign in _SSM_STRUCTURE_SIGNS:
+            if sign.lower() in leaf:
+                signs_found += 1
+                break  # Count each submodule once
+    return signs_found >= 2
+
 
 def _check_mamba(model) -> tuple[bool, str]:
-    """Return (is_hybrid, first_ssm_attr_found)."""
-    # Check the actual decoder layers (not the whole model, to avoid false positives
-    # from e.g. a conv layer in a vision encoder)
+    """Return (is_hybrid, first_ssm_attr_found).
+
+    Detection is dual-mode: first checks fixed attribute names (fast path),
+    then falls back to a structural heuristic when no known attributes are
+    found.  This handles custom architectures that rename SSM components
+    without breaking the architecture detection.
+    """
+    # Fast path: look for known SSM attribute names.
     try:
         from hmlcore.dense_pruner import find_decoder_layers
+
         layers, _ = _raw_find_decoder_layers(model)
         if layers is None:
             return False, ""
@@ -220,6 +296,18 @@ def _check_mamba(model) -> tuple[bool, str]:
                     return True, leaf
     except Exception:
         pass
+
+    # Structural fallback: at least two SSM-relevant submodules in a block.
+    try:
+        layers, _ = _raw_find_decoder_layers(model)
+        if layers is None:
+            return False, ""
+        for layer in layers:
+            if _has_ssm_structure(layer):
+                return True, "ssm-structural"
+    except Exception:
+        pass
+
     return False, ""
 
 
@@ -237,10 +325,17 @@ def _check_dense(model) -> tuple[bool, int]:
 def _raw_find_decoder_layers(model):
     """find_decoder_layers without the Mamba guard, for analysis only."""
     import torch
+
     _LAYER_PATHS = [
-        "model.layers", "model.model.layers", "transformer.h",
-        "model.transformer.h", "gpt_neox.layers", "model.gpt_neox.layers",
-        "layers", "model.blocks", "decoder.layers",
+        "model.layers",
+        "model.model.layers",
+        "transformer.h",
+        "model.transformer.h",
+        "gpt_neox.layers",
+        "model.gpt_neox.layers",
+        "layers",
+        "model.blocks",
+        "decoder.layers",
     ]
     for path in _LAYER_PATHS:
         obj = model
@@ -254,27 +349,60 @@ def _raw_find_decoder_layers(model):
     return None, None
 
 
-_VLM_CLASS_FRAGMENTS = frozenset({
-    "VisionLanguage", "LLaVA", "Qwen2VL", "Qwen2_VL",
-    "InternVL", "MiniCPMV", "CogVLM", "InstructBLIP",
-    "BLIP", "Flamingo", "Otter", "mPLUG",
-})
+_VLM_CLASS_FRAGMENTS = frozenset(
+    {
+        "VisionLanguage",
+        "LLaVA",
+        "Qwen2VL",
+        "Qwen2_VL",
+        "InternVL",
+        "MiniCPMV",
+        "CogVLM",
+        "InstructBLIP",
+        "BLIP",
+        "Flamingo",
+        "Otter",
+        "mPLUG",
+    }
+)
 
-_VLM_MODEL_TYPES = frozenset({
-    "llava", "llava_next", "qwen2_vl", "internvl", "minicpmv",
-    "blip_2", "instructblip", "flamingo", "idefics", "cogvlm",
-    "paligemma", "pixtral",
-})
+_VLM_MODEL_TYPES = frozenset(
+    {
+        "llava",
+        "llava_next",
+        "qwen2_vl",
+        "internvl",
+        "minicpmv",
+        "blip_2",
+        "instructblip",
+        "flamingo",
+        "idefics",
+        "cogvlm",
+        "paligemma",
+        "pixtral",
+    }
+)
 
-_VLM_CONFIG_ATTRS = frozenset({
-    "vision_config", "visual_config", "image_token_id",
-    "vision_feature_layer", "image_aspect_ratio",
-})
+_VLM_CONFIG_ATTRS = frozenset(
+    {
+        "vision_config",
+        "visual_config",
+        "image_token_id",
+        "vision_feature_layer",
+        "image_aspect_ratio",
+    }
+)
 
-_VLM_MODEL_ATTRS = frozenset({
-    "vision_model", "visual", "vision_tower", "vision_encoder",
-    "visual_encoder", "image_encoder",
-})
+_VLM_MODEL_ATTRS = frozenset(
+    {
+        "vision_model",
+        "visual",
+        "vision_tower",
+        "vision_encoder",
+        "visual_encoder",
+        "image_encoder",
+    }
+)
 
 
 def _check_vlm(model, tokenizer, is_multimodal: bool) -> bool:
@@ -301,7 +429,7 @@ def _check_vlm(model, tokenizer, is_multimodal: bool) -> bool:
 def _get_lib_versions() -> str:
     """Return a compact version string for key libraries without importing them."""
     import importlib.metadata
-    
+
     parts = []
     for lib in ("transformers", "trl", "peft", "unsloth"):
         try:
@@ -314,9 +442,10 @@ def _get_lib_versions() -> str:
 
 def _detect_quant(model) -> str:
     import torch
+
     has_uint8 = any(p.dtype == torch.uint8 for p in model.parameters())
-    has_int8  = any(p.dtype == torch.int8  for p in model.parameters())
-    has_bnb   = any(
+    has_int8 = any(p.dtype == torch.int8 for p in model.parameters())
+    has_bnb = any(
         "4bit" in type(m).__name__.lower() or "8bit" in type(m).__name__.lower()
         for _, m in model.named_modules()
     )
@@ -325,6 +454,7 @@ def _detect_quant(model) -> str:
     if has_int8:
         return "BitsAndBytes 8-bit (int8)"
     import torch
+
     counts: dict = {}
     for p in model.parameters():
         k = str(p.dtype).replace("torch.", "")

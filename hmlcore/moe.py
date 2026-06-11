@@ -1,5 +1,4 @@
 # By dreamraster · dreaMSCend
-#!/usr/bin/env python3
 """
 MoE Expert Pruning — REAP (Router-weighted Expert Activation Pruning).
 
@@ -100,15 +99,18 @@ def _compute_expert_output(experts, expert_input, eid):
     """
     Run a single expert's forward pass (gate_up → SiLU → down).
 
-    Supports two weight layouts:
-      - gate_up_proj / down_proj  (Qwen3-MoE, Qwen3-VL-MoE)
-      - w1 / w3 / w2              (Mixtral, DeepSeek-MoE)
+    Supports:
+      - nn.ModuleList / list / tuple (standard HuggingFace layouts: Qwen3-MoE, Mixtral)
+      - gate_up_proj / down_proj  (Qwen3-MoE, Qwen3-VL-MoE custom stacked)
+      - w1 / w3 / w2              (Mixtral, DeepSeek-MoE custom stacked)
 
     Returns:
         Expert output tensor of shape (num_tokens, hidden_dim), or None if
         the experts module uses an unrecognised layout.
     """
-    if hasattr(experts, 'gate_up_proj'):
+    if isinstance(experts, (torch.nn.ModuleList, list, tuple)):
+        return experts[eid](expert_input)
+    elif hasattr(experts, 'gate_up_proj'):
         gu = F.linear(expert_input, get_expert_weight(experts, 'gate_up_proj', eid))
         gate_act, up = gu.chunk(2, dim=-1)
         return F.linear(F.silu(gate_act) * up,

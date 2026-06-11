@@ -18,7 +18,7 @@ Pipeline:
      topology detection MUST run after merge so plain HF paths resolve.
   3. Route to pruning:
      - MoE model  → REAP calibration + expert pruning
-     - Dense model → ShortGPT layer dropping
+     - Dense model → Bonsai/DLP structural pruning
 
 Consumes:  model, tokenizer, dataset, args, use_unsloth
 Produces:  (model is modified in-place; _already_merged flag set on args)
@@ -35,6 +35,7 @@ import torch
 
 from hmlcore.nodes.base import BaseNode, NodeError
 from hmlcore.nodes.context import NodeContext
+from hmlcore.shortcut_heads import unwrap_model
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ def _is_quantized(model) -> bool:
     return False
 
 
-def _merge_lora_via_bf16_reload(model, tokenizer) -> object:
+def _merge_lora_via_bf16_reload(model, tokenizer, args) -> object:
     """
     Dequantise + merge LoRA by reloading the base model in bf16.
 
@@ -93,7 +94,8 @@ def _merge_lora_via_bf16_reload(model, tokenizer) -> object:
         )
 
     logger.info(
-        "  Base model for reload: %s", base_model_name,
+        "  Base model for reload: %s",
+        base_model_name,
     )
 
     tmp_adapter = tempfile.mkdtemp(prefix="hml_prune_adapter_")
@@ -118,27 +120,31 @@ def _merge_lora_via_bf16_reload(model, tokenizer) -> object:
         # Resolve LOADER: Use Unsloth if globally active so that patched architectures
         # reach their initialized kernel state (apply_qkv, etc.) on the new instance.
         from hmlcore.model import use_unsloth_backend
+
         is_unsloth = use_unsloth_backend()
-        
+
         if is_unsloth:
             from unsloth import FastLanguageModel
+
             logger.info("  Reloading base model in %s on GPU via Unsloth ...", dtype)
             base, _ = FastLanguageModel.from_pretrained(
-                model_name        = base_model_name,
-                max_seq_length    = 8192,  # Doesn't matter for merge but keeps Unsloth happy
-                dtype             = dtype,
-                load_in_4bit      = False, # We want bf16/f16 for merge
-                trust_remote_code = True,
-                device_map        = device_map,
+                model_name=base_model_name,
+                max_seq_length=getattr(args, "merge_max_seq_length", 8192),
+                dtype=dtype,
+                load_in_4bit=False,  # We want bf16/f16 for merge
+                trust_remote_code=True,
+                device_map=device_map,
             )
         else:
-            logger.info("  Reloading base model in %s on GPU via standard HF ...", dtype)
+            logger.info(
+                "  Reloading base model in %s on GPU via standard HF ...", dtype
+            )
             base = AutoModelForCausalLM.from_pretrained(
                 base_model_name,
-                torch_dtype       = dtype,
-                device_map        = device_map,
-                trust_remote_code = True,
-                low_cpu_mem_usage = True,
+                torch_dtype=dtype,
+                device_map=device_map,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
             )
 
         logger.info("  Attaching adapter and merging ...")
@@ -148,6 +154,7 @@ def _merge_lora_via_bf16_reload(model, tokenizer) -> object:
         # After merge_and_unload(), BnB Linear4bit layers still hold quantized
         # weights.  Dequantize to plain bf16 so calibration and state_dict() work.
         from hmlcore.nodes.output_node import _dequantize_bnb_model
+
         merged = _dequantize_bnb_model(merged, dtype)
 
         return merged
@@ -165,15 +172,28 @@ class PrunerNode(BaseNode):
         args = ctx.get("args")
         if args is None:
             return False
-        return getattr(args, "prune_experts", False) or getattr(args, "prune_only", False)
+        return getattr(args, "prune", False)
 
     def run(self, ctx: NodeContext) -> None:
         self._require(ctx, "model", "tokenizer", "dataset", "args", "use_unsloth")
-        args        = ctx["args"]
-        model       = ctx["model"]
-        tokenizer   = ctx["tokenizer"]
-        dataset     = ctx["dataset"]
+        args = ctx["args"]
+        model = ctx["model"]
+        tokenizer = ctx["tokenizer"]
+        dataset = ctx["dataset"]
         use_unsloth = ctx["use_unsloth"]
+
+        # ── Unwrap shortcut heads before merge ──────────────────────────────
+        # unwrap_model is safe to call on any model (idempotent).
+        from hmlcore.shortcut_heads import ShortcutLossWrapper
+        is_wrapped = (
+            isinstance(model, ShortcutLossWrapper)
+            or (hasattr(model, "_hml_is_shortcut_wrapped") and model._hml_is_shortcut_wrapped)
+        )
+        unwrapped = unwrap_model(model)
+        if is_wrapped or unwrapped is not model:
+            logger.info("🔓 Shortcut heads unwrapped before merge in pruner.")
+        model = unwrapped
+        ctx["model"] = model
 
         # ── Step 1: Merge LoRA adapter FIRST ─────────────────────────────────
         # CRITICAL: topology detection (find_decoder_layers) MUST run on the
@@ -183,7 +203,7 @@ class PrunerNode(BaseNode):
         # when accessed through PEFT's __getattr__ proxy).  Running detection
         # on the PeftModel causes find_decoder_layers to return None, which
         # makes PrunerNode exit early — pruning never runs.
-        logger.info("�� Merging LoRA adapter before pruning ...")
+        logger.info("🔀 Merging LoRA adapter before pruning ...")
 
         quantized = _is_quantized(model)
         if quantized:
@@ -194,7 +214,7 @@ class PrunerNode(BaseNode):
                 "reloading from local cache."
             )
             try:
-                model = _merge_lora_via_bf16_reload(model, tokenizer)
+                model = _merge_lora_via_bf16_reload(model, tokenizer, args)
             except Exception as exc:
                 raise NodeError(
                     f"bf16 reload merge failed: {exc}. "
@@ -209,7 +229,7 @@ class PrunerNode(BaseNode):
                     "  Direct merge failed (%s) — falling back to bf16 reload.", exc
                 )
                 try:
-                    model = _merge_lora_via_bf16_reload(model, tokenizer)
+                    model = _merge_lora_via_bf16_reload(model, tokenizer, args)
                 except Exception as exc2:
                     raise NodeError(f"All merge strategies failed: {exc2}") from exc2
 
@@ -223,7 +243,8 @@ class PrunerNode(BaseNode):
         dominant_dtype = _dominant_dtype(model)
         logger.info(
             "  Merged model: dtype=%s  trainable_params=%s",
-            dominant_dtype, f"{trainable:,}",
+            dominant_dtype,
+            f"{trainable:,}",
         )
         if trainable > 0:
             logger.warning(
@@ -234,36 +255,19 @@ class PrunerNode(BaseNode):
             )
 
         # ── Step 2: Detect topology on the MERGED bf16 model ─────────────────
-        from hmlcore.moe import find_moe_layers
         from hmlcore.dense_pruner import find_decoder_layers
+        from hmlcore.moe import find_moe_layers
+
         moe_layers = find_moe_layers(model)
-        is_moe     = len(moe_layers) > 0
+        is_moe = len(moe_layers) > 0
 
         if is_moe:
             logger.info(
-                "�� Topology: MoE model — %d expert layer(s) found. "
+                "🎯 Topology: MoE model — %d expert layer(s) found. "
                 "Using REAP expert pruning.",
                 len(moe_layers),
             )
         else:
-            # --prune_experts explicitly requests REAP (MoE expert pruning).
-            # A dense model has no experts to prune — warn clearly and bail out.
-            # Exception: --prune_only means "use whatever pruning fits this model"
-            # (apply_args sets prune_experts=True for --prune_only, so we must
-            # distinguish the two cases explicitly).
-            explicit_reap = (
-                getattr(args, "prune_experts", False)
-                and not getattr(args, "prune_only", False)
-            )
-            if explicit_reap:
-                logger.warning(
-                    "⚠️  --prune_experts was passed but %s has no MoE expert "
-                    "layers.  REAP requires a Mixture-of-Experts architecture "
-                    "(e.g. Qwen3-30B-A3B, OLMoE-1B-7B, Mixtral-8x7B).  "
-                    "Falling back to ShortGPT dense layer dropping.",
-                    type(model).__name__,
-                )
-
             dec_layers, _ = find_decoder_layers(model)
             if dec_layers is None:
                 logger.error(
@@ -275,16 +279,16 @@ class PrunerNode(BaseNode):
                 return
             logger.info(
                 "ℹ️  Topology: dense model (%d transformer blocks). "
-                "Using ShortGPT layer dropping (REAP requires MoE).",
+                "Using Bonsai/DLP structural pruning.",
                 len(dec_layers),
             )
 
         # ── Step 3: Prune or quantize ─────────────────────────────────────────
-        calibration_samples  = getattr(args, "calibration_samples", 128)
+        calibration_samples = getattr(args, "calibration_samples", 128)
         calibration_strategy = getattr(args, "calibration_strategy", "longest")
-        prune_ratio          = getattr(args, "prune_ratio", 0.5)
-        max_length           = getattr(args, "max_length", 2048)
-        dynamicquant         = getattr(args, "dynamicquant", False)
+        prune_ratio = getattr(args, "prune_ratio", 0.5)
+        max_length = getattr(args, "max_length", 2048)
+        dynamicquant = getattr(args, "dynamicquant", False)
 
         if dynamicquant:
             logger.info(
@@ -294,21 +298,24 @@ class PrunerNode(BaseNode):
 
         if is_moe:
             from hmlcore.moe import reap_prune_moe
+
             logger.info(
-                "�� REAP: %d samples, strategy=%s, prune_ratio=%.2f%s",
-                calibration_samples, calibration_strategy, prune_ratio,
+                "🔬 REAP: %d samples, strategy=%s, prune_ratio=%.2f%s",
+                calibration_samples,
+                calibration_strategy,
+                prune_ratio,
                 "  [dynamicquant=1-bit]" if dynamicquant else "",
             )
             try:
                 model, quant_info = reap_prune_moe(
-                    model                = model,
-                    tokenizer            = tokenizer,
-                    dataset              = dataset,
-                    prune_ratio          = prune_ratio,
-                    num_samples          = calibration_samples,
-                    max_cal_length       = max_length,
-                    calibration_strategy = calibration_strategy,
-                    dynamicquant         = dynamicquant,
+                    model=model,
+                    tokenizer=tokenizer,
+                    dataset=dataset,
+                    prune_ratio=prune_ratio,
+                    num_samples=calibration_samples,
+                    max_cal_length=max_length,
+                    calibration_strategy=calibration_strategy,
+                    dynamicquant=dynamicquant,
                 )
                 if dynamicquant and quant_info:
                     ctx["quantized_experts"] = quant_info
@@ -317,21 +324,31 @@ class PrunerNode(BaseNode):
 
         else:
             from hmlcore.dense_pruner import drop_dense_layers
+
+            bonsai_noise = getattr(args, "bonsai_noise", 1e-4)
+            dlp_scale = getattr(args, "dlp_scale", 1.0)
             logger.info(
-                "✂️  ShortGPT: %d samples, strategy=%s, prune_ratio=%.2f%s",
-                calibration_samples, calibration_strategy, prune_ratio,
+                "✂️  Bonsai/DLP: %d samples, strategy=%s, prune_ratio=%.2f%s  "
+                "[noise=%.1e, dlp_scale=%.1f]",
+                calibration_samples,
+                calibration_strategy,
+                prune_ratio,
                 "  [dynamicquant=1-bit]" if dynamicquant else "",
+                bonsai_noise,
+                dlp_scale,
             )
             try:
                 model, quant_indices = drop_dense_layers(
-                    model                = model,
-                    tokenizer            = tokenizer,
-                    dataset              = dataset,
-                    prune_ratio          = prune_ratio,
-                    num_samples          = calibration_samples,
-                    max_cal_length       = max_length,
-                    calibration_strategy = calibration_strategy,
-                    dynamicquant         = dynamicquant,
+                    model=model,
+                    tokenizer=tokenizer,
+                    dataset=dataset,
+                    prune_ratio=prune_ratio,
+                    num_samples=calibration_samples,
+                    max_cal_length=max_length,
+                    calibration_strategy=calibration_strategy,
+                    dynamicquant=dynamicquant,
+                    bonsai_noise=bonsai_noise,
+                    dlp_scale=dlp_scale,
                 )
                 if dynamicquant and quant_indices:
                     ctx["quantized_layers"] = quant_indices

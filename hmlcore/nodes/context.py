@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 try:
     from typing import TypedDict
-except ImportError:                         # Python < 3.8 fallback
+except ImportError:  # Python < 3.8 fallback
     from typing_extensions import TypedDict  # type: ignore
 
 
@@ -32,7 +32,7 @@ class NodeContext(TypedDict, total=False):
     is_multimodal: bool
 
     # ── Dataset ──────────────────────────────────────────────────────────────
-    dataset: Any          # HuggingFace Dataset
+    dataset: Any  # HuggingFace Dataset
 
     # ── Stage directories ────────────────────────────────────────────────────
     sft_dir: str
@@ -46,6 +46,9 @@ class NodeContext(TypedDict, total=False):
     # ── Reward functions (built inside GRPONode) ─────────────────────────────
     reward_funcs: list
     judge: Optional[Any]  # LMStudioJudge or None
+
+    # ── Shortcut heads (Qwen3-style auxiliary lookahead) ────────────────────
+    shortcut_manager: Any | None  # ShortcutManager or None
 
 
 def make_context(args: argparse.Namespace) -> NodeContext:

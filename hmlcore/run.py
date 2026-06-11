@@ -1,5 +1,4 @@
 # By dreamraster · dreaMSCend
-#!/usr/bin/env python3
 """
 hmlcore/run.py  —  Entry point for GRPO-based distillation.
 
@@ -14,7 +13,7 @@ Usage:
     python -m hmlcore.run ... --resume
 
     # Merge adapter into full model after training:
-    python -m hmlcore.run ... --merge --merge_quantization bf16
+    python -m hmlcore.run ... --merge --quantize bf16
 
     # Custom reasoning tags:
     python -m hmlcore.run ... --r_start "<think>" --r_end "</think>" \\
@@ -73,14 +72,21 @@ def main():
 
     # ── Load model + tokenizer ────────────────────────────────────────────────
     model, tokenizer, use_unsloth = load_model_and_tokenizer(args)
-    tokenizer = setup_chat_template(tokenizer)
+    
+    _cls_name = type(model).__name__
+    is_multimodal = (
+        "ConditionalGeneration" in _cls_name
+        or hasattr(getattr(model, "config", None), "vision_config")
+    )
+    tokenizer = setup_chat_template(tokenizer, is_multimodal=is_multimodal)
 
     # ── Load + preprocess dataset ─────────────────────────────────────────────
     dataset = load_and_preprocess_dataset(
-        paths      = args.datasets.split(","),
-        tokenizer  = tokenizer,
-        domain     = args.domain,
-        max_length = args.max_length,
+        paths         = args.datasets.split(","),
+        tokenizer     = tokenizer,
+        domain        = args.domain,
+        max_length    = args.max_length,
+        is_multimodal = is_multimodal,
     )
 
     # ── Step 1: SFT warm-up ───────────────────────────────────────────────────

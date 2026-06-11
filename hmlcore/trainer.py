@@ -13,22 +13,61 @@ is_sft_complete(sft_dir) -> bool
 load_sft_adapter(model, sft_dir)
 """
 
-import os
 import glob
 import logging
+import os
 from contextlib import contextmanager
 
 from transformers.trainer_utils import get_last_checkpoint
-# from trl import GRPOConfig, GRPOTrainer, SFTTrainer, SFTConfig (moved inside functions)
 
+# from trl import GRPOConfig, GRPOTrainer, SFTTrainer, SFTConfig (moved inside functions)
 import hmlcore.config as cfg
 
 logger = logging.getLogger(__name__)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Shortcut-head helpers
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _log_shortcut_summary(model, manager):
+    """Log shortcut loss summary if shortcut heads are active."""
+    from hmlcore.shortcut_heads import ShortcutLossWrapper, unwrap_model
+
+    if manager is None:
+        return
+
+    # The manager always has _results populated after the last training batch
+    if not manager._results:
+        return
+
+    # Re-trigger _compute in case results are stale
+    manager._compute()
+
+    bd = manager.shortcut_loss_breakdown()
+    sc_loss = manager.shortcut_loss().item()
+    logger.info(
+        "�� Shortcut heads — total aux loss=%.6f (%d heads):",
+        sc_loss,
+        len(bd),
+    )
+    for row in bd:
+        logger.info(
+            "  head#%d: layer=%d, offset=+%d, loss=%.6f (weighted=%.6f, valid=%d)",
+            row["head_idx"],
+            row["layer"],
+            row["offset"],
+            row["loss"],
+            row["weighted_loss"],
+            row["valid_tokens"],
+        )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Resume helpers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def find_last_checkpoint(directory: str) -> str | None:
     """Return the most recent HF Trainer checkpoint path, or None.
@@ -47,7 +86,9 @@ def find_last_checkpoint(directory: str) -> str | None:
     # Manual fallback: find highest-numbered checkpoint-<int> dir
     candidates = sorted(
         glob.glob(os.path.join(directory, "checkpoint-*")),
-        key=lambda p: int(p.rsplit("-", 1)[-1]) if p.rsplit("-", 1)[-1].isdigit() else -1,
+        key=lambda p: (
+            int(p.rsplit("-", 1)[-1]) if p.rsplit("-", 1)[-1].isdigit() else -1
+        ),
     )
     if candidates:
         logger.warning(
@@ -71,7 +112,8 @@ def is_sft_complete(sft_dir: str) -> bool:
 
 def load_sft_adapter(model, sft_dir: str):
     """Load a previously saved SFT LoRA adapter into an existing PeftModel."""
-    from peft import set_peft_model_state_dict, load_peft_weights
+    from peft import load_peft_weights, set_peft_model_state_dict
+
     logger.info(f"Loading SFT adapter from {sft_dir}")
     weights = load_peft_weights(sft_dir)
     set_peft_model_state_dict(model, weights)
@@ -82,10 +124,8 @@ def load_sft_adapter(model, sft_dir: str):
 # SFT stage
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def run_sft(model, tokenizer, dataset, args, sft_dir: str,
-            sft_checkpoint: str | None):
-    from trl import SFTTrainer, SFTConfig
-    from unsloth.chat_templates import train_on_responses_only
+
+def run_sft(model, tokenizer, dataset, args, sft_dir: str, sft_checkpoint: str | None):
     """Run the SFT formatting warm-up on a small subset of the dataset.
 
     Builds a 'text' column via apply_chat_template and trains SFTTrainer.
@@ -93,15 +133,25 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
 
     If 'sft_complete' already exists in sft_dir, it loads the adapter and skips training.
     """
+    from trl import SFTConfig, SFTTrainer
+
     if is_sft_complete(sft_dir):
         logger.info("✅ SFT already complete — loading adapter from %s", sft_dir)
         load_sft_adapter(model, sft_dir)
+        # Log shortcut summary even when skipping
+        _log_shortcut_summary(
+            model, args.shortcut_manager if hasattr(args, "shortcut_manager") else None
+        )
         return
 
     sft_dataset = dataset.select(range(min(len(dataset), 100)))
 
     if len(sft_dataset) == 0:
         logger.warning("SFT dataset slice is empty — nothing to train on.")
+        # Log shortcut summary even for empty dataset
+        _log_shortcut_summary(
+            model, args.shortcut_manager if hasattr(args, "shortcut_manager") else None
+        )
         return
 
     def tokenize_sft(x):
@@ -114,8 +164,8 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
                 target = resp
             elif "<think>" in str(resp) and "</think>" in str(resp):
                 thought = str(resp).split("<think>")[1].split("</think>")[0]
-                tail    = str(resp).split("</think>")[1].strip()
-                target  = (
+                tail = str(resp).split("</think>")[1].strip()
+                target = (
                     f"{cfg.REASONING_START}{thought}{cfg.REASONING_END}"
                     f"{cfg.SOLUTION_START}{tail}{cfg.SOLUTION_END}"
                 )
@@ -128,14 +178,13 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
             # The chat template prepends REASONING_START to every assistant turn —
             # strip it here to avoid doubling.
             if target.startswith(cfg.REASONING_START):
-                target = target[len(cfg.REASONING_START):]
+                target = target[len(cfg.REASONING_START) :]
 
         # Normalise raw_messages: HF Arrow may return dict-of-lists
         raw = x["raw_messages"]
         if isinstance(raw, dict):
             raw_msgs = [
-                {"role": r, "content": c}
-                for r, c in zip(raw["role"], raw["content"])
+                {"role": r, "content": c} for r, c in zip(raw["role"], raw["content"])
             ]
         else:
             raw_msgs = list(raw)
@@ -178,21 +227,25 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
     sft_dataset = sft_dataset.select_columns(["text"])
 
     # ── Train ─────────────────────────────────────────────────────────────
-    logger.info("📈 Step 1: SFT warm-up (%d examples) ...", len(sft_dataset))
+    logger.info("�� Step 1: SFT warm-up (%d examples) ...", len(sft_dataset))
 
     trainer = SFTTrainer(
-        model            = model,
-        processing_class = tokenizer,
-        train_dataset    = sft_dataset,
-        args             = SFTConfig(
-            output_dir                  = sft_dir,
-            dataset_text_field          = "text",
-            per_device_train_batch_size = args.batch_size,
-            learning_rate               = 2e-4,
-            num_train_epochs            = 1,
-            max_steps                   = getattr(args, "max_steps", -1),
-            logging_steps               = 10,
-            report_to                   = "none",
+        model=model,
+        processing_class=tokenizer,
+        train_dataset=sft_dataset,
+        max_seq_length=args.max_length,  # disable_unsloth does not like this option.
+        args=SFTConfig(
+            output_dir=sft_dir,
+            dataset_text_field="text",
+            per_device_train_batch_size=args.batch_size,
+            learning_rate=2e-4,
+            num_train_epochs=1,
+            max_steps=1,  # getattr(args, "max_steps", -1),
+            logging_steps=10,
+            report_to="none",
+            lr_scheduler_type="cosine",
+            warmup_ratio=getattr(args, "sft_warmup_ratio", 0.05),
+            max_grad_norm=getattr(args, "max_grad_norm", 1.0),
         ),
     )
 
@@ -200,15 +253,28 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
         logger.info("▶️  Resuming SFT from %s", sft_checkpoint)
 
     if cfg.QWEN_JACK:
+        # Only import unsloth here — importing it at module/function level would
+        # patch the transformers registry even when --disable_unsloth is set.
+        from unsloth.chat_templates import train_on_responses_only
+
         trainer = train_on_responses_only(
             trainer,
-            instruction_part = "<|im_start|>user\n",
-            response_part = "<|im_start|>assistant\n<think>\n",
+            instruction_part="<|im_start|>user\n",
+            response_part="<|im_start|>assistant\n",
         )
 
     if cfg.QWEN_JACK:
         logger.info("Tokenization (QWEN_JACK):")
-        logger.info(tokenizer.decode(trainer.train_dataset[0]["input_ids"]))
+        if len(trainer.train_dataset) > 0:
+            logger.info(tokenizer.decode(trainer.train_dataset[0]["input_ids"]))
+        else:
+            raise RuntimeError(
+                "SFT dataset is empty after Unsloth filtering! This usually means "
+                "the 'instruction_part' or 'response_part' strings in trainer.py "
+                "do not exactly match what the tokenizer produces."
+            )
+
+    # ── Train ──────────────────────────────────────────────────────────────
     # trainer.train(resume_from_checkpoint=sft_checkpoint)
     # trainer.save_model(sft_dir)
 
@@ -217,6 +283,11 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
 
     trainer.train(resume_from_checkpoint=sft_checkpoint)
     trainer.save_model(sft_dir)
+
+    # Log shortcut loss summary (heads are still active during this point)
+    sc_mgr = getattr(args, "shortcut_manager", None)
+    if sc_mgr is not None:
+        _log_shortcut_summary(model, sc_mgr)
 
     # Write completion sentinel
     open(os.path.join(sft_dir, "sft_complete"), "w").close()
@@ -227,9 +298,11 @@ def run_sft(model, tokenizer, dataset, args, sft_dir: str,
 # GRPO stage
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 @contextmanager
 def _grpo_config_compat():
     from trl import GRPOConfig
+
     """Patch GRPOConfig.__post_init__ to be idempotent during GRPOTrainer.__init__.
 
     In TRL ≥ 0.14, GRPOConfig.__post_init__ raises ValueError when both
@@ -257,8 +330,10 @@ def _grpo_config_compat():
         # Both non-None = dataclasses.replace copied previously-computed values.
         # Clear steps_per_generation so the original logic recomputes it from
         # generation_batch_size without raising the mutual-exclusion error.
-        if (getattr(self, "steps_per_generation", None) is not None
-                and getattr(self, "generation_batch_size", None) is not None):
+        if (
+            getattr(self, "steps_per_generation", None) is not None
+            and getattr(self, "generation_batch_size", None) is not None
+        ):
             try:
                 self.steps_per_generation = None
             except Exception:
@@ -272,9 +347,17 @@ def _grpo_config_compat():
         GRPOConfig.__post_init__ = _orig
 
 
-def run_grpo(model, tokenizer, dataset, reward_funcs: list, args,
-             grpo_dir: str, grpo_checkpoint: str | None):
+def run_grpo(
+    model,
+    tokenizer,
+    dataset,
+    reward_funcs: list,
+    args,
+    grpo_dir: str,
+    grpo_checkpoint: str | None,
+):
     from trl import GRPOConfig, GRPOTrainer
+
     """Run GRPO reinforcement learning.
 
     resume_from_checkpoint is set in three places (belt-and-suspenders) because
@@ -283,7 +366,7 @@ def run_grpo(model, tokenizer, dataset, reward_funcs: list, args,
       2. trainer.args patched after GRPOTrainer.__init__
       3. Passed directly to trainer.train()
     """
-    logger.info(f"🎯 Step 2: GRPO RL ({args.domain}) ...")
+    logger.info(f"�� Step 2: GRPO RL ({args.domain}) ...")
 
     # TRL ≥ 0.14 added steps_per_generation (default non-None in some builds).
     # prepare_peft_model() internally calls dataclasses.replace(args,
@@ -302,23 +385,25 @@ def run_grpo(model, tokenizer, dataset, reward_funcs: list, args,
     #      num_generations * batch_size, which is always divisible.
     _extra: dict = {}
     if hasattr(GRPOConfig, "steps_per_generation"):
-        _extra["steps_per_generation"]  = None
+        _extra["steps_per_generation"] = None
         _extra["generation_batch_size"] = args.num_generations * args.batch_size
 
     grpo_config = GRPOConfig(
-        output_dir                  = grpo_dir,
-        gradient_checkpointing      = True,
-        learning_rate               = 5e-6,
-        per_device_train_batch_size = args.batch_size,
-        gradient_accumulation_steps = 4,
-        num_generations             = args.num_generations,
-        max_prompt_length           = args.max_length // 4,
-        max_completion_length       = args.max_length - (args.max_length // 4),
-        max_steps                   = args.max_steps,
-        logging_steps               = 1,
-        save_steps                  = 50,
-        save_total_limit            = 3,
-        report_to                   = "none",
+        output_dir=grpo_dir,
+        gradient_checkpointing=True,
+        learning_rate=5e-6,
+        per_device_train_batch_size=args.batch_size,
+        gradient_accumulation_steps=getattr(args, "gradient_accumulation", 4),
+        lr_scheduler_type="cosine",
+        warmup_ratio=getattr(args, "grpo_warmup_ratio", 0.1),
+        num_generations=args.num_generations,
+        max_prompt_length=args.max_length // 4,
+        max_completion_length=args.max_length - (args.max_length // 4),
+        max_steps=args.max_steps,
+        logging_steps=1,
+        save_steps=50,
+        save_total_limit=3,
+        report_to="none",
         **_extra,
     )
     # After __post_init__, steps_per_generation is auto-computed from
@@ -329,19 +414,25 @@ def run_grpo(model, tokenizer, dataset, reward_funcs: list, args,
 
     if grpo_checkpoint:
         grpo_config.resume_from_checkpoint = grpo_checkpoint
-        logger.info(f"📌 GRPO resume checkpoint: {grpo_checkpoint}")
+        logger.info(f"�� GRPO resume checkpoint: {grpo_checkpoint}")
 
     with _grpo_config_compat():
         trainer = GRPOTrainer(
-            model            = model,
-            reward_funcs     = reward_funcs,
-            args             = grpo_config,
-            train_dataset    = dataset,
-            processing_class = tokenizer,
+            model=model,
+            reward_funcs=reward_funcs,
+            args=grpo_config,
+            train_dataset=dataset,
+            processing_class=tokenizer,
         )
 
     if grpo_checkpoint:
         trainer.args.resume_from_checkpoint = grpo_checkpoint
 
     trainer.train(resume_from_checkpoint=grpo_checkpoint)
+
+    # Log shortcut loss summary (if still active)
+    sc_mgr = getattr(args, "shortcut_manager", None)
+    if sc_mgr is not None:
+        _log_shortcut_summary(model, sc_mgr)
+
     logger.info("✅ GRPO training complete.")

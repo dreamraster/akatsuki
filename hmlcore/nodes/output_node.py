@@ -29,6 +29,7 @@ Produces:  finale_dir
 
 from __future__ import annotations
 
+import gc
 import glob
 import logging
 import os
@@ -43,15 +44,26 @@ logger = logging.getLogger(__name__)
 # Every value here triggers Unsloth's save_pretrained_gguf path instead of
 # plain HF save.  "bf16" is intentionally excluded — it means "save as HF
 # checkpoint".  Keep in sync with the choices list in config.py.
-_GGUF_QUANTS = frozenset({
-    "f16",
-    "q8_0", "q6_k",
-    "q5_k_m", "q5_k", "q4_k_m", "q4_k",
-    "q3_k_m", "q2_k",
-    "iq4_xs", "iq3_xxs",
-    "iq2_xxs", "iq2_xs", "iq2_s",
-    "iq1_s", "iq1_m",
-})
+_GGUF_QUANTS = frozenset(
+    {
+        "f16",
+        "q8_0",
+        "q6_k",
+        "q5_k_m",
+        "q5_k",
+        "q4_k_m",
+        "q4_k",
+        "q3_k_m",
+        "q2_k",
+        "iq4_xs",
+        "iq3_xxs",
+        "iq2_xxs",
+        "iq2_xs",
+        "iq2_s",
+        "iq1_s",
+        "iq1_m",
+    }
+)
 
 # Weight-file patterns that can conflict when a directory is reused across runs
 # (e.g. a 4-bit model.safetensors from a failed merge run sitting alongside a
@@ -79,7 +91,8 @@ def _purge_stale_weights(directory: str) -> None:
                 logger.warning(
                     "  Could not remove stale file %s (%s) — "
                     "save_pretrained will attempt to overwrite it.",
-                    os.path.basename(path), exc,
+                    os.path.basename(path),
+                    exc,
                 )
 
 
@@ -87,7 +100,7 @@ def _log_model_stats(model, tokenizer, save_dir: str) -> None:
     """Log a concise summary of the saved model: params, layers, dtype, MoE, disk size."""
     try:
         # ── Parameter counts ─────────────────────────────────────────────
-        total_params    = sum(p.numel() for p in model.parameters())
+        total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
         # ── Memory estimate by dtype ─────────────────────────────────────
@@ -95,8 +108,11 @@ def _log_model_stats(model, tokenizer, save_dir: str) -> None:
         # For reporting we count bytes as-stored; note 4-bit models will
         # show ~half the "logical" parameter count.
         _BYTES = {
-            torch.float32: 4, torch.float16: 2, torch.bfloat16: 2,
-            torch.int8: 1, torch.uint8: 1,
+            torch.float32: 4,
+            torch.float16: 2,
+            torch.bfloat16: 2,
+            torch.int8: 1,
+            torch.uint8: 1,
         }
         dtype_counts: dict = {}
         total_bytes = 0
@@ -106,7 +122,9 @@ def _log_model_stats(model, tokenizer, save_dir: str) -> None:
             key = str(p.dtype).replace("torch.", "")
             dtype_counts[key] = dtype_counts.get(key, 0) + p.numel()
         size_gb = total_bytes / 1e9
-        dominant_dtype = max(dtype_counts, key=dtype_counts.get) if dtype_counts else "unknown"
+        dominant_dtype = (
+            max(dtype_counts, key=dtype_counts.get) if dtype_counts else "unknown"
+        )
 
         # ── Transformer layer count ───────────────────────────────────────
         num_layers = None
@@ -121,9 +139,10 @@ def _log_model_stats(model, tokenizer, save_dir: str) -> None:
         moe_line = ""
         try:
             from hmlcore.moe import find_moe_layers, get_num_experts
+
             moe_layers = find_moe_layers(model)
             if moe_layers:
-                ne    = get_num_experts(moe_layers)
+                ne = get_num_experts(moe_layers)
                 top_k = "?"
                 if cfg:
                     for attr in ("num_experts_per_tok", "top_k"):
@@ -138,10 +157,10 @@ def _log_model_stats(model, tokenizer, save_dir: str) -> None:
             pass
 
         # ── Vocab / context ───────────────────────────────────────────────
-        vocab_size   = getattr(cfg, "vocab_size",   None) if cfg else None
-        max_pos      = getattr(cfg, "max_position_embeddings", None) if cfg else None
-        hidden_size  = getattr(cfg, "hidden_size",  None) if cfg else None
-        num_heads    = getattr(cfg, "num_attention_heads", None) if cfg else None
+        vocab_size = getattr(cfg, "vocab_size", None) if cfg else None
+        max_pos = getattr(cfg, "max_position_embeddings", None) if cfg else None
+        hidden_size = getattr(cfg, "hidden_size", None) if cfg else None
+        num_heads = getattr(cfg, "num_attention_heads", None) if cfg else None
 
         # ── Disk size ─────────────────────────────────────────────────────
         disk_bytes = 0
@@ -160,11 +179,13 @@ def _log_model_stats(model, tokenizer, save_dir: str) -> None:
         logger.info(sep)
         logger.info(
             "  Parameters:  %s total  |  %s trainable",
-            f"{total_params:,}", f"{trainable_params:,}",
+            f"{total_params:,}",
+            f"{trainable_params:,}",
         )
         logger.info(
             "  Memory est:  %.2f GB  (%s dominant)",
-            size_gb, dominant_dtype,
+            size_gb,
+            dominant_dtype,
         )
         if num_layers is not None:
             extra = ""
@@ -225,7 +246,8 @@ def _safe_save_pretrained(model, tokenizer, save_dir: str) -> None:
     except Exception as exc:
         logger.warning(
             "  safetensors save failed (%s: %s) — trying pytorch_model.bin.",
-            type(exc).__name__, exc or "no message",
+            type(exc).__name__,
+            exc or "no message",
         )
 
     # ── Attempt 2: save_pretrained with pytorch_model.bin ─────────────────
@@ -238,7 +260,8 @@ def _safe_save_pretrained(model, tokenizer, save_dir: str) -> None:
         logger.warning(
             "  save_pretrained(safe_serialization=False) also failed (%s: %s) — "
             "falling back to direct torch.save (bypasses revert_weight_conversion).",
-            type(exc).__name__, exc or "no message",
+            type(exc).__name__,
+            exc or "no message",
         )
 
     # ── Attempt 3: direct torch.save — bypasses all transformers save hooks ──
@@ -246,8 +269,7 @@ def _safe_save_pretrained(model, tokenizer, save_dir: str) -> None:
     # logic.  This is the same strategy used in _peft_merge_save.
     logger.info("  Building state dict for direct torch.save ...")
     state_dict = {
-        k: v.detach().cpu().clone().contiguous()
-        for k, v in model.state_dict().items()
+        k: v.detach().cpu().clone().contiguous() for k, v in model.state_dict().items()
     }
     bin_path = os.path.join(save_dir, "pytorch_model.bin")
     _torch.save(state_dict, bin_path)
@@ -275,13 +297,13 @@ def _strip_bnb_config(model, save_dir: str | None = None) -> None:
     cfg = getattr(model, "config", None)
     if cfg is None:
         return
-        
+
     _bnb_attrs = (
         "quantization_config",
         "bitsandbytes",
         "_pre_quantization_dtype",
     )
-    
+
     # ── In-Memory Surgery ──────────────────────────────────────────────────
     for attr in _bnb_attrs:
         # Try both direct attribute access and __dict__
@@ -293,7 +315,7 @@ def _strip_bnb_config(model, save_dir: str | None = None) -> None:
                     cfg.__dict__.pop(attr, None)
         except Exception:
             pass
-            
+
     # Also look inside the attribute_map if it exists
     attribute_map = getattr(cfg, "attribute_map", {})
     if attribute_map:
@@ -302,30 +324,33 @@ def _strip_bnb_config(model, save_dir: str | None = None) -> None:
                 attribute_map.pop(k, None)
 
     # ── On-Disk Surgery (The Nuclear Option) ──────────────────────────────
-    # If a save_dir is provided, we read the config.json back from disk and 
-    # manually excise any residual BnB blocks. This is the only way to be 
+    # If a save_dir is provided, we read the config.json back from disk and
+    # manually excise any residual BnB blocks. This is the only way to be
     # 100% sure that GGUF converters won't see "null" or leftover fields.
     if save_dir and os.path.isdir(save_dir):
         config_path = os.path.join(save_dir, "config.json")
         if os.path.exists(config_path):
             try:
                 import re
+
                 with open(config_path, "r", encoding="utf-8") as f:
                     content = f.read()
-                
+
                 # Remove "quantization_config": { ... } logic
                 # This regex handles nested braces for simple BnB configs
                 content = re.sub(r'"quantization_config":\s*\{[^\}]+\},?', "", content)
                 content = re.sub(r'"quantization_config":\s*null,?', "", content)
                 content = re.sub(r'"_pre_quantization_dtype":\s*"[^"]*",?', "", content)
                 content = re.sub(r'"_pre_quantization_dtype":\s*null,?', "", content)
-                
+
                 # Clean up any trailing commas before a closing brace
-                content = re.sub(r',\s*\}', '}', content)
-                
+                content = re.sub(r",\s*\}", "}", content)
+
                 with open(config_path, "w", encoding="utf-8") as f:
                     f.write(content)
-                logger.debug("  Cleaned config.json surgery complete (removed BnB metadata).")
+                logger.debug(
+                    "  Cleaned config.json surgery complete (removed BnB metadata)."
+                )
             except Exception as exc:
                 logger.warning("  Could not perform config.json surgery: %s", exc)
 
@@ -370,25 +395,75 @@ def _dequantize_bnb_model(model, dtype: "torch.dtype"):
         return model
 
     logger.info("  Dequantizing %d BnB layer(s) to %s ...", len(replacements), dtype)
-    for parent, attr, module in replacements:
+    for i, (parent, attr, module) in enumerate(replacements):
         device = next(iter(module.parameters())).device
         if isinstance(module, bnb.nn.Linear4bit):
-            w = bnb.functional.dequantize_4bit(
-                module.weight.data,
-                module.weight.quant_state,
-            ).to(dtype)
+            # bnb.functional.dequantize_4bit on CPU often no-ops or returns garbage
+            # in some BnB versions (NF4 CPU kernel issues).
+            # Force dequantization on CUDA if available.
+            if torch.cuda.is_available() and module.weight.device.type == "cpu":
+                try:
+                    # module.weight.to("cuda") handles moving both .data and .quant_state
+                    # correctly, preventing 'illegal memory access' crashes.
+                    gpu_weight = module.weight.to("cuda", non_blocking=True)
+                    w = (
+                        bnb.functional.dequantize_4bit(
+                            gpu_weight.data, gpu_weight.quant_state
+                        )
+                        .to(dtype)
+                        .cpu()
+                    )
+                    del gpu_weight
+                except RuntimeError as e:
+                    if "out of memory" in str(e):
+                        logger.warning(
+                            "  CUDA OOM during dequantization — falling back to "
+                            "CPU-only mode. This is slower but safer for limited "
+                            "VRAM systems."
+                        )
+                        w = bnb.functional.dequantize_4bit(
+                            module.weight.data, module.weight.quant_state
+                        ).to(dtype)
+                    else:
+                        raise
+            else:
+                w = bnb.functional.dequantize_4bit(
+                    module.weight.data, module.weight.quant_state
+                ).to(dtype)
+
+            # Ensure the dequantized weights match the expected [out, in] shape.
+            expected_shape = (module.out_features, module.in_features)
+            if w.shape != torch.Size(expected_shape):
+                try:
+                    w = w.reshape(expected_shape).contiguous()
+                except Exception as reshape_exc:
+                    logger.warning(
+                        "  BnB dequantize reshape failed for %s (got %s, want %s): %s",
+                        attr,
+                        tuple(w.shape),
+                        expected_shape,
+                        reshape_exc,
+                    )
         else:
             w = module.weight.data.to(dtype)
 
         new_layer = torch.nn.Linear(
-            module.in_features, module.out_features,
+            module.in_features,
+            module.out_features,
             bias=module.bias is not None,
-            device=device, dtype=dtype,
+            device=device,
+            dtype=dtype,
         )
         new_layer.weight = torch.nn.Parameter(w)
         if module.bias is not None:
             new_layer.bias = torch.nn.Parameter(module.bias.data.to(dtype))
         setattr(parent, attr, new_layer)
+
+        # Periodic cleanup prevents memory blowup on large models (70B+).
+        if (i + 1) % 10 == 0:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     logger.info("  BnB dequantization complete (%d layers).", len(replacements))
 
@@ -423,8 +498,10 @@ def _peft_merge_save(model, tokenizer, save_dir: str):
     from peft import PeftModel
     from transformers import AutoConfig, AutoModelForCausalLM
 
-    logger.info("🔀 PEFT fallback merge: reloading base model in bf16 to avoid "
-                "4-bit dequantisation / RoPE-size errors ...")
+    logger.info(
+        "�� PEFT fallback merge: reloading base model in bf16 to avoid "
+        "4-bit dequantisation / RoPE-size errors ..."
+    )
 
     # Retrieve base model path from the embedded peft config
     try:
@@ -444,20 +521,38 @@ def _peft_merge_save(model, tokenizer, save_dir: str):
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
         logger.info("  Loading fresh base model on CPU ...")
 
-        # Load WITH the embedded quantization_config intact.
-        # If we strip it, transformers builds a clean bf16 model (weights shaped
-        # e.g. [1024, 3072]) but then tries to load BnB-packed tensors from disk
-        # (shaped [1572864, 1]) → shape mismatch → RuntimeError.
-        # With quantization_config present, BnB correctly unpacks the on-disk
-        # weights.  We then call merge_and_unload() and explicitly dequantize the
-        # remaining Linear4bit layers to clean bf16 via _dequantize_bnb_model().
-        base = AutoModelForCausalLM.from_pretrained(
-            base_model_name,
-            torch_dtype       = dtype,
-            device_map        = "cpu",
-            trust_remote_code = True,
-            low_cpu_mem_usage = True,
-        )
+        # Choose the loader based on whether Unsloth is active.
+        # If Unsloth was activated, it has patched the transformers model registry —
+        # AutoModelForCausalLM.from_pretrained() would return a patched class that
+        # requires Unsloth CUDA kernels which are NOT set up for bare base loads.
+        # Use FastLanguageModel.from_pretrained() in that case to get a clean
+        # base model that can then accept the PEFT adapter.
+        from hmlcore.model import use_unsloth_backend
+
+        if use_unsloth_backend():
+            from unsloth import FastLanguageModel
+
+            logger.info("  Using FastLanguageModel loader (Unsloth active) ...")
+            base, _ = FastLanguageModel.from_pretrained(
+                model_name=base_model_name,
+                max_seq_length=getattr(args, "merge_max_seq_length", 8192),
+                dtype=dtype,
+                load_in_4bit=False,
+                trust_remote_code=True,
+                device_map="cpu",
+            )
+        else:
+            # Standard HF loader — only safe when Unsloth has NOT patched the registry.
+            # If Unsloth was imported elsewhere (e.g. via --qwen_jack) this path is
+            # still reached but will return a patched class.  That case is prevented
+            # by keeping all unsloth imports conditional on actual use.
+            base = AutoModelForCausalLM.from_pretrained(
+                base_model_name,
+                torch_dtype=dtype,
+                device_map="cpu",
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+            )
 
         logger.info("  Attaching adapter and merging ...")
         merged = PeftModel.from_pretrained(base, tmp_adapter)
@@ -503,17 +598,17 @@ def _peft_merge_save(model, tokenizer, save_dir: str):
 # Key: PyTorch attribute suffix inside a decoder block.
 # Value: GGUF tensor name suffix (appended to "blk.{i}.").
 _GGUF_TENSOR_MAP = {
-    "self_attn.q_proj":   "attn_q",
-    "self_attn.k_proj":   "attn_k",
-    "self_attn.v_proj":   "attn_v",
-    "self_attn.o_proj":   "attn_output",
-    "mlp.gate_proj":      "ffn_gate",
-    "mlp.up_proj":        "ffn_up",
-    "mlp.down_proj":      "ffn_down",
+    "self_attn.q_proj": "attn_q",
+    "self_attn.k_proj": "attn_k",
+    "self_attn.v_proj": "attn_v",
+    "self_attn.o_proj": "attn_output",
+    "mlp.gate_proj": "ffn_gate",
+    "mlp.up_proj": "ffn_up",
+    "mlp.down_proj": "ffn_down",
     # Phi-3 / Phi-3.5 naming
     "self_attn.qkv_proj": "attn_qkv",
-    "mlp.fc1":            "ffn_up",
-    "mlp.fc2":            "ffn_down",
+    "mlp.fc1": "ffn_up",
+    "mlp.fc2": "ffn_down",
 }
 
 
@@ -538,17 +633,17 @@ def _log_dynamic_gguf_guidance(
     if not layer_indices and not expert_info:
         return
 
-    f16_name   = os.path.join(save_dir, "model_f16.gguf")
+    f16_name = os.path.join(save_dir, "model_f16.gguf")
     mixed_name = os.path.join(save_dir, f"model_dynamic_{base_quant}.gguf")
 
     # Build the --tensor-type flags
     tensor_flags = []
-    
+
     # Recommendation: q2_k requires 256-column alignment and usually an imatrix.
     # If not aligned, llama.cpp falls back to iq4_nl (much larger).
     # q2_k is a safer fallback for non-aligned models or when no imatrix is available.
     target_dq_type = "q2_k"
-    
+
     # Heuristic: check if we should suggest q2_k instead of iq1_s
     # (We don't have easy access to hidden_size here without the model,
     # but we can try to get it from ctx or just warn the user).
@@ -559,7 +654,7 @@ def _log_dynamic_gguf_guidance(
         hsz = getattr(cfg, "hidden_size", 4096)
         if hsz % 256 != 0:
             is_aligned = False
-            target_dq_type = "q2_k" # Safer fallback
+            target_dq_type = "q2_k"  # Safer fallback
     except Exception:
         pass
 
@@ -567,7 +662,9 @@ def _log_dynamic_gguf_guidance(
     if layer_indices:
         for i in sorted(layer_indices):
             for _suffix in _GGUF_TENSOR_MAP.values():
-                tensor_flags.append(f'--tensor-type "blk.{i}.{_suffix}.weight={target_dq_type}"')
+                tensor_flags.append(
+                    f'--tensor-type "blk.{i}.{_suffix}.weight={target_dq_type}"'
+                )
 
     # Case 2: MoE Expert DynamicQuant
     if expert_info:
@@ -579,13 +676,16 @@ def _log_dynamic_gguf_guidance(
         for layer_path, eids in expert_info.items():
             # Extract block index from path (e.g. "model.layers.13" -> 13)
             import re
+
             match = re.search(r"\d+", layer_path)
             if match:
                 idx = match.group()
                 for eid in eids:
                     # Generic guess for expert tensor names
                     for _suffix in ("ffn_gate", "ffn_up", "ffn_down"):
-                        tensor_flags.append(f'--tensor-type "blk.{idx}.{_suffix}.{eid}.weight={target_dq_type}"')
+                        tensor_flags.append(
+                            f'--tensor-type "blk.{idx}.{_suffix}.{eid}.weight={target_dq_type}"'
+                        )
 
     if not tensor_flags:
         return
@@ -600,45 +700,60 @@ def _log_dynamic_gguf_guidance(
     if layer_indices:
         logger.info(
             "  %d layer(s) were 1-bit pre-quantized (indices: %s).",
-            len(layer_indices), layer_indices,
+            len(layer_indices),
+            layer_indices,
         )
     if expert_info:
         logger.info(
             "  %d experts across %d layer(s) were 1-bit pre-quantized.",
-            sum(len(v) for v in expert_info.values()), len(expert_info),
+            sum(len(v) for v in expert_info.values()),
+            len(expert_info),
         )
 
-    logger.info(
-        "  Standard GGUF converters apply a single quant type to all tensors."
-    )
+    logger.info("  Standard GGUF converters apply a single quant type to all tensors.")
     logger.info(
         "  For a true dynamic GGUF (pre-quantized → %s, others → %s), "
-        "use llama-quantize:", target_dq_type, base_quant,
+        "use llama-quantize:",
+        target_dq_type,
+        base_quant,
     )
     logger.info("")
     if not is_aligned:
         logger.info(
             "  ⚠️  Note: Model hidden_size is not divisible by 256. Using %s instead of iq1_s\n"
-            "      to avoid llama.cpp alignment errors and iq4_nl fallbacks.", target_dq_type
+            "      to avoid llama.cpp alignment errors and iq4_nl fallbacks.",
+            target_dq_type,
         )
-    logger.info("  Note: iq* quants (like iq1_s) REQUIRE an importance matrix (--imatrix).")
-    logger.info("        If they fail, use --imatrix <file.dat> or use %s for those layers.", target_dq_type)
+    logger.info(
+        "  Note: iq* quants (like iq1_s) REQUIRE an importance matrix (--imatrix)."
+    )
+    logger.info(
+        "        If they fail, use --imatrix <file.dat> or use %s for those layers.",
+        target_dq_type,
+    )
     logger.info("")
     logger.info("  Step 1 — Convert to F16 GGUF:")
     logger.info(
         "    python convert_hf_to_gguf.py %s --outtype f16 --outfile %s",
-        save_dir, f16_name,
+        save_dir,
+        f16_name,
     )
     logger.info("")
-    logger.info("  Step 2 — Re-quantize with per-layer/expert overrides (llama.cpp ≥ b3000):")
+    logger.info(
+        "  Step 2 — Re-quantize with per-layer/expert overrides (llama.cpp ≥ b3000):"
+    )
     logger.info(
         "    llama-quantize \\\n  %s \\\n  %s %s %s",
-        flags_str, f16_name, mixed_name, base_quant,
+        flags_str,
+        f16_name,
+        mixed_name,
+        base_quant,
     )
     logger.info("")
     logger.info(
         "  Result: blk.N.* (quantized) → %s  |  all other tensors → %s",
-        target_dq_type, base_quant,
+        target_dq_type,
+        base_quant,
     )
     logger.info("━" * 68)
     logger.info("")
@@ -651,10 +766,21 @@ class OutputNode(BaseNode):
 
     def run(self, ctx: NodeContext) -> None:
         self._require(ctx, "model", "tokenizer", "args", "use_unsloth")
-        args        = ctx["args"]
-        model       = ctx["model"]
-        tokenizer   = ctx["tokenizer"]
+        args = ctx["args"]
+        model = ctx["model"]
+        tokenizer = ctx["tokenizer"]
         use_unsloth = ctx["use_unsloth"]
+
+        from hmlcore.shortcut_heads import ShortcutLossWrapper, unwrap_model
+
+        is_wrapped = (
+            isinstance(model, ShortcutLossWrapper)
+            or (hasattr(model, "_hml_is_shortcut_wrapped") and model._hml_is_shortcut_wrapped)
+        )
+        if is_wrapped:
+            model = unwrap_model(model)
+            ctx["model"] = model
+            logger.info("�� Shortcut heads detached before merge.")
 
         finale_dir = os.path.join(args.output_dir, "finale")
         os.makedirs(finale_dir, exist_ok=True)
@@ -669,75 +795,98 @@ class OutputNode(BaseNode):
 
         ctx["finale_dir"] = finale_dir
 
-        do_merge       = getattr(args, "merge", False)
-        quant          = getattr(args, "quantize", "bf16")
+        do_merge = getattr(args, "merge", False)
+        quant = getattr(args, "quantize", "bf16")
         already_merged = getattr(args, "_already_merged", False)
 
         logger.info(
-            "💾 Saving model → %s  (merge=%s, quantize=%s, already_merged=%s)",
-            finale_dir, do_merge, quant, already_merged,
+            "�� Saving model → %s  (merge=%s, quantize=%s, already_merged=%s)",
+            finale_dir,
+            do_merge,
+            quant,
+            already_merged,
         )
 
         # stats_model tracks what was actually saved — updated whenever we
         # produce a freshly merged bf16 model so _log_model_stats is accurate.
         stats_model = model
 
-        # ── Already-merged path (REAP / ShortGPT pruner output) ─────────────
+        # ── Already-merged path (REAP / Bonsai-DLP pruner output) ────────────
         if already_merged:
-            if use_unsloth and quant in _GGUF_QUANTS and hasattr(model, "save_pretrained_gguf"):
-                logger.info("🔀 Unsloth GGUF export (%s) → %s", quant, finale_dir)
+            if (
+                use_unsloth
+                and quant in _GGUF_QUANTS
+                and hasattr(model, "save_pretrained_gguf")
+            ):
+                logger.info("�� Unsloth GGUF export (%s) → %s", quant, finale_dir)
                 try:
-                    model.save_pretrained_gguf(finale_dir, tokenizer,
-                                               quantization_method=quant)
+                    model.save_pretrained_gguf(
+                        finale_dir, tokenizer, quantization_method=quant
+                    )
                 except Exception as exc:
                     logger.warning(
                         "⚠️  Unsloth GGUF export failed (%s). "
                         "Falling back to HF format. "
                         "You can convert manually: "
                         "python convert_hf_to_gguf.py %s",
-                        exc, finale_dir,
+                        exc,
+                        finale_dir,
                     )
                     _safe_save_pretrained(model, tokenizer, finale_dir)
             else:
-                logger.info("💾 HF save (already merged) → %s", finale_dir)
+                logger.info("�� HF save (already merged) → %s", finale_dir)
                 _safe_save_pretrained(model, tokenizer, finale_dir)
 
         # ── Normal merge path ─────────────────────────────────────────────────
         elif do_merge and use_unsloth:
             if quant in _GGUF_QUANTS and hasattr(model, "save_pretrained_gguf"):
-                logger.info("🔀 Unsloth GGUF export (%s) → %s", quant, finale_dir)
+                logger.info("�� Unsloth GGUF export (%s) → %s", quant, finale_dir)
                 try:
-                    model.save_pretrained_gguf(finale_dir, tokenizer,
-                                               quantization_method=quant)
+                    model.save_pretrained_gguf(
+                        finale_dir, tokenizer, quantization_method=quant
+                    )
                 except Exception as exc:
                     logger.warning(
                         "⚠️  Unsloth GGUF export failed (%s). "
                         "Falling back to HF format. "
                         "You can convert manually: "
                         "python convert_hf_to_gguf.py %s",
-                        exc, finale_dir,
+                        exc,
+                        finale_dir,
                     )
                     stats_model = _peft_merge_save(model, tokenizer, finale_dir)
             else:
-                logger.info("🔀 Unsloth merge (%s) → %s", quant, finale_dir)
+                logger.info("�� Unsloth merge (%s) → %s", quant, finale_dir)
                 try:
-                    model.save_pretrained_merged(finale_dir, tokenizer, save_method=quant)
+                    model.save_pretrained_merged(
+                        finale_dir, tokenizer, save_method=quant
+                    )
                 except Exception as exc:
                     logger.warning(
                         "⚠️  Unsloth merge failed (%s). "
                         "Falling back to standard PEFT merge → %s",
-                        exc, finale_dir,
+                        exc,
+                        finale_dir,
                     )
                     stats_model = _peft_merge_save(model, tokenizer, finale_dir)
 
         elif do_merge:
-            logger.info("🔀 Standard PEFT merge → %s", finale_dir)
+            if quant in _GGUF_QUANTS:
+                logger.warning(
+                    "⚠️  --quantize %s (GGUF) requires Unsloth, but Unsloth is not active "
+                    "(--disable_unsloth was set or Unsloth is not installed). "
+                    "Saving as plain HF bf16 checkpoint instead.  "
+                    "To get GGUF: remove --disable_unsloth, or convert manually with "
+                    "convert_hf_to_gguf.py after saving.",
+                    quant,
+                )
+            logger.info("�� Standard PEFT merge → %s", finale_dir)
             stats_model = model.merge_and_unload()
             stats_model.save_pretrained(finale_dir)
             tokenizer.save_pretrained(finale_dir)
 
         else:
-            logger.info("💾 Saving LoRA adapter only → %s", finale_dir)
+            logger.info("�� Saving LoRA adapter only → %s", finale_dir)
             model.save_pretrained(finale_dir)
             tokenizer.save_pretrained(finale_dir)
 
@@ -753,8 +902,21 @@ class OutputNode(BaseNode):
         # commands needed to produce a mixed-precision GGUF.
         if getattr(args, "dynamicquant", False):
             layer_indices = ctx.get("quantized_layers")
-            expert_info   = ctx.get("quantized_experts")
-            base_quant    = quant if quant in _GGUF_QUANTS else "q8_0"
-            _log_dynamic_gguf_guidance(finale_dir, layer_indices, expert_info, base_quant, model=model)
+            expert_info = ctx.get("quantized_experts")
+            base_quant = quant if quant in _GGUF_QUANTS else "q8_0"
+            _log_dynamic_gguf_guidance(
+                finale_dir, layer_indices, expert_info, base_quant, model=model
+            )
 
-        logger.info("🎉 Model saved → %s", finale_dir)
+        # ── Cache merged model for PRISMDQNode ───────────────────────────────────
+        # PRISMDQNode needs a plain float (BF16/FP32) model to compute spectral
+        # metrics.  Loading from pytorch_model.bin can fail when BnB packed
+        # tensors end up in the file (CPU dequant issue).  Storing stats_model
+        # here sidesteps the disk round-trip entirely.
+        if getattr(args, "prism_dq", False):
+            # stats_model is the merged float model (may differ from the original
+            # 4-bit PeftModel that `model` still references).
+            ctx["analysis_model"] = stats_model
+            logger.debug("  Cached merged model in ctx for PRISM-DQ analysis.")
+
+        logger.info("�� Model saved → %s", finale_dir)

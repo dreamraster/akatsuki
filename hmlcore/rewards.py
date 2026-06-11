@@ -20,11 +20,11 @@ build_reward_functions(args, tokenizer) -> list[callable]
     call judge.close() after training).
 """
 
-import re
-import time
 import hashlib
 import logging
+import re
 import threading
+import time
 from collections import OrderedDict
 
 import httpx
@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 def get_format_regex(eos_token: str | None = None) -> re.Pattern:
     """Compile the solution-block extraction regex.
 
@@ -46,10 +47,10 @@ def get_format_regex(eos_token: str | None = None) -> re.Pattern:
     """
     eos_pattern = re.escape(eos_token) if eos_token else r"\S*"
     return re.compile(
-        rf"{re.escape(cfg.REASONING_END)} .*? {re.escape(cfg.SOLUTION_START)}"
-        rf" (.+?) {re.escape(cfg.SOLUTION_END)}"
-        rf" [\s]{{0,}} (?:{eos_pattern})? [\s]{{0,}}$",
-        flags=re.MULTILINE | re.DOTALL | re.VERBOSE,
+        rf"{re.escape(cfg.REASONING_END)}.*?{re.escape(cfg.SOLUTION_START)}"
+        rf"(.+?){re.escape(cfg.SOLUTION_END)}"
+        rf"[\s]{{0,}}(?:{eos_pattern})?[\s]{{0,}}$",
+        flags=re.MULTILINE | re.DOTALL,
     )
 
 
@@ -58,17 +59,17 @@ def _extract_thinking(response: str) -> str:
     # If the standard tags are found, use them
     if cfg.REASONING_START in response and cfg.REASONING_END in response:
         return response.split(cfg.REASONING_START)[1].split(cfg.REASONING_END)[0]
-    
-    # Robust fallback for QWEN_JACK: prompt ends with <think>, 
+
+    # Robust fallback for QWEN_JACK: prompt ends with <think>,
     # so response starts with thinking content and only contains the END tag.
     if getattr(cfg, "QWEN_JACK", False):
         if cfg.REASONING_END in response and cfg.REASONING_START not in response:
             return response.split(cfg.REASONING_END)[0]
-        
+
         # If the model got stuck and never generated REASONING_END, the entire block is thinking.
         if cfg.REASONING_START not in response:
             return response
-            
+
     return ""
 
 
@@ -80,17 +81,18 @@ def _extract_solution(response: str) -> str:
     if cfg.SOLUTION_START and cfg.SOLUTION_END:
         if cfg.SOLUTION_START in response and cfg.SOLUTION_END in response:
             return response.split(cfg.SOLUTION_START)[1].split(cfg.SOLUTION_END)[0]
-    
+
     # Fallback for empty/missing solution tags (e.g. QWEN_JACK mode)
     if cfg.REASONING_END in response:
         return response.split(cfg.REASONING_END)[-1].strip()
-        
+
     return ""
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Format rewards  (all domains)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def check_thinking_termination(prompts, completions, **kwargs):
     """Strict penalty for failing to terminate the thinking block."""
@@ -104,13 +106,21 @@ def check_thinking_termination(prompts, completions, **kwargs):
 
 
 def match_format_approximately(prompts, completions, **kwargs):
-    """±0.5 per tag — rewards partial tag presence even when structure is wrong."""
+    """±0.5 per tag — rewards partial tag presence even when structure is wrong.
+
+    Unlike ``_match_format_exactly``, this function works on individual tags
+    so it gives finer-grained signal when only some tags are present.
+    Its range (−4 … +4) overlaps with _match_format_exactly's (3.0)
+    intentionally: the exact-match bonus is added on top of the
+    approximate score, giving full-completion examples a combined reward
+    of 5.0 (3.0 + 2.0) and near-misses a non-zero reward (e.g. 0.5).
+    """
     scores = []
     for c in completions:
-        s  = 0.5 if c.count(cfg.REASONING_START) == 1 else -1.0
-        s += 0.5 if c.count(cfg.REASONING_END)   == 1 else -1.0
-        s += 0.5 if c.count(cfg.SOLUTION_START)  == 1 else -1.0
-        s += 0.5 if c.count(cfg.SOLUTION_END)    == 1 else -1.0
+        s = 0.0
+        for tag in (cfg.REASONING_START, cfg.REASONING_END, cfg.SOLUTION_START, cfg.SOLUTION_END):
+            if tag:
+                s += 0.5 if c.count(tag) == 1 else -1.0
         scores.append(s)
     return scores
 
@@ -150,15 +160,20 @@ def check_math_working_steps(prompts, completions, **kwargs):
             scores.append(-1.0)
             continue
         step_count = len(_STEP_RE.findall(thinking))
-        eq_lines   = sum(
-            1 for line in thinking.splitlines()
+        eq_lines = sum(
+            1
+            for line in thinking.splitlines()
             if "=" in line and any(ch.isdigit() for ch in line)
         )
         total = step_count + eq_lines
-        if   total >= 5: scores.append(2.0)
-        elif total >= 3: scores.append(1.0)
-        elif total >= 1: scores.append(0.5)
-        else:            scores.append(-0.5)
+        if total >= 5:
+            scores.append(2.0)
+        elif total >= 3:
+            scores.append(1.0)
+        elif total >= 1:
+            scores.append(0.5)
+        else:
+            scores.append(-0.5)
     return scores
 
 
@@ -178,9 +193,12 @@ def check_math_units(prompts, completions, **kwargs):
             continue
         solution = _extract_solution(c)
         answer_units = set(_UNIT_RE.findall(solution.lower()))
-        if answer_units & prompt_units:   scores.append(1.5)
-        elif answer_units:                scores.append(0.5)
-        else:                             scores.append(-1.0)
+        if answer_units & prompt_units:
+            scores.append(1.5)
+        elif answer_units:
+            scores.append(0.5)
+        else:
+            scores.append(-1.0)
     return scores
 
 
@@ -203,8 +221,10 @@ def check_math_reasoning_quality(prompts, completions, **kwargs):
             continue
         lines = [l.strip() for l in thinking.splitlines() if l.strip()]
         score = 0.0
-        if   len(lines) >= 5: score += 1.0
-        elif len(lines) >= 3: score += 0.5
+        if len(lines) >= 5:
+            score += 1.0
+        elif len(lines) >= 3:
+            score += 0.5
         eq_count = sum(1 for l in lines if "=" in l and any(ch.isdigit() for ch in l))
         score += min(eq_count * 0.3, 1.0)
         unique_ratio = len(set(words)) / max(len(words), 1)
@@ -228,10 +248,13 @@ def check_code_heuristic(prompts, completions, **kwargs):
         code = _extract_solution(c)
         score = 0.0
         kw_hits = sum(1 for kw in _CODE_KEYWORDS if kw in code)
-        if kw_hits >= 2: score += 2.0
-        if len(code.strip()) < 10: score -= 2.0
+        if kw_hits >= 2:
+            score += 2.0
+        if len(code.strip()) < 10:
+            score -= 2.0
         thinking = _extract_thinking(c)
-        if len(thinking.strip()) > 50: score += 1.0
+        if len(thinking.strip()) > 50:
+            score += 1.0
         scores.append(score)
     return scores
 
@@ -285,17 +308,20 @@ class LMStudioJudge:
     by max_cache_size.
     """
 
-    def __init__(self, base_url: str, model: str,
-                 timeout: int = 60, max_cache_size: int = 2048):
-        self.url   = base_url.rstrip("/") + "/v1/chat/completions"
+    def __init__(
+        self, base_url: str, model: str, timeout: int = 60, max_cache_size: int = 2048
+    ):
+        self.url = base_url.rstrip("/") + "/v1/chat/completions"
         self.model = model
         self._client = httpx.Client(timeout=timeout)
-        self._lock   = threading.Lock()
+        self._lock = threading.Lock()
         self._cache: OrderedDict[str, float] = OrderedDict()
-        self._max    = max_cache_size
-        self._hits   = 0
+        self._max = max_cache_size
+        self._hits = 0
         self._misses = 0
-        logger.info(f"LMStudioJudge → {self.url}  model={model}  cache={max_cache_size}")
+        logger.info(
+            f"LMStudioJudge → {self.url}  model={model}  cache={max_cache_size}"
+        )
 
     # ── Cache ─────────────────────────────────────────────────────────────────
 
@@ -324,17 +350,20 @@ class LMStudioJudge:
 
     def _call(self, messages: list) -> float | None:
         try:
-            resp = self._client.post(self.url, json={
-                "model": self.model,
-                "messages": messages,
-                "temperature": 0.0,
-                "max_tokens": 16,
-            })
+            resp = self._client.post(
+                self.url,
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0.0,
+                    "max_tokens": 16,
+                },
+            )
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"].strip()
             m = _SCORE_RE.search(text)
             if m:
-                return float(m.group(1)) / 10.0 * 5.0   # normalise to 0–5
+                return float(m.group(1)) / 10.0 * 5.0  # normalise to 0–5
         except Exception as e:
             logger.debug(f"Judge call error: {e}")
         return None
@@ -365,13 +394,16 @@ class LMStudioJudge:
         if raw.endswith(cfg.REASONING_START):
             raw = raw[: -len(cfg.REASONING_START)]
 
-        problem  = raw.strip()[-800:]   # cap length for the judge
+        problem = raw.strip()[-800:]  # cap length for the judge
         solution = _extract_solution(completion)
 
         template = _JUDGE_PROMPT_CODE if domain == "code" else _JUDGE_PROMPT_GENERAL
-        messages = [{"role": "user", "content": template.format(
-            problem=problem, solution=solution
-        )}]
+        messages = [
+            {
+                "role": "user",
+                "content": template.format(problem=problem, solution=solution),
+            }
+        ]
 
         result = self._call(messages)
         if result is None:
@@ -385,10 +417,12 @@ class LMStudioJudge:
         return result
 
     def cache_stats(self) -> str:
-        total    = self._hits + self._misses
+        total = self._hits + self._misses
         hit_rate = self._hits / max(total, 1) * 100
-        return (f"Judge cache: {len(self._cache)}/{self._max} entries, "
-                f"{self._hits}/{total} hits ({hit_rate:.1f}%)")
+        return (
+            f"Judge cache: {len(self._cache)}/{self._max} entries, "
+            f"{self._hits}/{total} hits ({hit_rate:.1f}%)"
+        )
 
     def close(self):
         self._client.close()
@@ -401,10 +435,11 @@ class LMStudioJudge:
 import json
 import math
 
+
 def _extract_solution_json(completion: str) -> dict | None:
     """Extract and parse the JSON block between <solution> tags.
-    
-    Robust to truncation: if </solution> is missing, attempts to parse 
+
+    Robust to truncation: if </solution> is missing, attempts to parse
     everything from <solution> to the end of the string.
     """
     try:
@@ -414,26 +449,27 @@ def _extract_solution_json(completion: str) -> dict | None:
     except Exception:
         return None
 
+
 def check_spatial_precision(prompts, completions, **kwargs):
     """Reward for coordinate precision in 2D space.
-    
+
     Expected ground truth 'completion' format: "[x, y]" or JSON with 'position'.
     Predicted format: JSON with 'position' key.
-    
+
     Score: 5.0 * exp(-distance / 100)  -- smoothed proximity reward.
     """
     scores = []
     # GRPOTrainer passes ground truth via 'completion' column in kwargs (as list)
     gt_list = kwargs.get("completion", [None] * len(completions))
-    
+
     for c, gt_raw in zip(completions, gt_list):
         pred_json = _extract_solution_json(c)
         if not pred_json or "position" not in pred_json:
             scores.append(-2.0)
             continue
-            
+
         try:
-            pred_pos = pred_json["position"] # [x, y]
+            pred_pos = pred_json["position"]  # [x, y]
             # Ground truth might be a string "[x, y]" or a list
             if isinstance(gt_raw, str):
                 # Try to parse as JSON if it looks like a list
@@ -444,8 +480,10 @@ def check_spatial_precision(prompts, completions, **kwargs):
                     gt_pos = json.loads(gt_raw).get("position")
             else:
                 gt_pos = gt_raw
-                
-            dist = math.sqrt((pred_pos[0] - gt_pos[0])**2 + (pred_pos[1] - gt_pos[1])**2)
+
+            dist = math.sqrt(
+                (pred_pos[0] - gt_pos[0]) ** 2 + (pred_pos[1] - gt_pos[1]) ** 2
+            )
             # Perfect match = 5.0, 100px off = 1.83, 500px off = 0.03
             score = 5.0 * math.exp(-dist / 100.0)
             scores.append(round(score, 2))
@@ -453,40 +491,43 @@ def check_spatial_precision(prompts, completions, **kwargs):
             scores.append(0.0)
     return scores
 
+
 def check_scene_connectivity(prompts, completions, **kwargs):
     """Reward for correct object-to-object connectivity.
-    
+
     Checks if 'connect_to' ID in prediction matches the ground truth.
     """
     scores = []
     gt_list = kwargs.get("completion", [None] * len(completions))
-    
+
     for c, gt_raw in zip(completions, gt_list):
         pred_json = _extract_solution_json(c)
         if not pred_json:
             scores.append(-1.0)
             continue
-            
+
         try:
             pred_conn = pred_json.get("connect_to")
             if isinstance(gt_raw, str) and gt_raw.startswith("{"):
                 gt_conn = json.loads(gt_raw).get("connect_to")
             else:
-                gt_conn = None # Unknown
-                
+                gt_conn = None  # Unknown
+
             if pred_conn == gt_conn and gt_conn is not None:
                 scores.append(3.0)
             elif pred_conn is not None:
-                scores.append(-1.0) # Wrong target
+                scores.append(-1.0)  # Wrong target
             else:
-                scores.append(0.0) # No connection attempted
+                scores.append(0.0)  # No connection attempted
         except Exception:
             scores.append(0.0)
     return scores
 
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Factory — call this from trainer.py
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None"]:
     """Build the reward-function list for the given domain.
@@ -503,11 +544,12 @@ def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None
 
     def _check_math_answer(prompts, completions, **kwargs):
         answers = kwargs.get("answer", [None] * len(completions))
-        regex   = get_format_regex(_eos)
-        scores  = []
+        regex = get_format_regex(_eos)
+        scores = []
         for c, true_ans_raw in zip(completions, answers):
-            true_ans = (true_ans_raw[0] if isinstance(true_ans_raw, list)
-                        else true_ans_raw)
+            true_ans = (
+                true_ans_raw[0] if isinstance(true_ans_raw, list) else true_ans_raw
+            )
             m = regex.search(c)
             if not m:
                 scores.append(-2.5)
@@ -518,6 +560,13 @@ def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None
                 ft = float(str(true_ans).replace(",", ""))
                 if fg == ft:
                     scores.append(5.0)
+                elif abs(ft) < 1e-6:
+                    # Near-zero correct answer — use absolute error to avoid
+                    # the denominator exploding (e.g. |0.0001 - 0| / 1e-9 = 100_000)
+                    if abs(fg - ft) < 0.01:
+                        scores.append(3.5)
+                    else:
+                        scores.append(-1.5)
                 elif abs(fg - ft) / (abs(ft) + 1e-9) < 0.01:
                     scores.append(3.5)
                 else:
@@ -527,7 +576,11 @@ def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None
         return scores
 
     # ── Base rewards (all domains) ────────────────────────────────────────────
-    reward_funcs = [_match_format_exactly, match_format_approximately, check_thinking_termination]
+    reward_funcs = [
+        _match_format_exactly,
+        match_format_approximately,
+        check_thinking_termination,
+    ]
     judge = None
 
     # ── Domain-specific rewards ───────────────────────────────────────────────
@@ -538,45 +591,50 @@ def build_reward_functions(args, tokenizer) -> tuple[list, "LMStudioJudge | None
             check_math_units,
             check_math_reasoning_quality,
         ]
-        logger.info("📐 Math rewards: correctness + working steps + units + reasoning quality")
+        logger.info(
+            "�� Math rewards: correctness + working steps + units + reasoning quality"
+        )
 
     elif args.domain == "scene":
         reward_funcs += [
             check_spatial_precision,
             check_scene_connectivity,
         ]
-        logger.info("🎨 Scene rewards: spatial precision + connectivity mapping")
+        logger.info("�� Scene rewards: spatial precision + connectivity mapping")
 
     elif args.domain in ("code", "general"):
         use_judge = (not args.disable_judge) and bool(args.judge_model)
 
         if use_judge:
             judge = LMStudioJudge(
-                base_url       = args.judge_url,
-                model          = args.judge_model,
-                timeout        = args.judge_timeout,
-                max_cache_size = args.judge_cache_size,
+                base_url=args.judge_url,
+                model=args.judge_model,
+                timeout=args.judge_timeout,
+                max_cache_size=args.judge_cache_size,
             )
             _dom = args.domain
 
             def _llm_judge(prompts, completions, **kwargs):
-                scores = [judge.score(p, c, _dom)
-                          for p, c in zip(prompts, completions)]
+                scores = [judge.score(p, c, _dom) for p, c in zip(prompts, completions)]
                 logger.debug(judge.cache_stats())
                 return scores
 
             reward_funcs.append(_llm_judge)
             logger.info(
-                f"🤖 {args.domain.capitalize()} rewards: LLM judge "
+                f"�� {args.domain.capitalize()} rewards: LLM judge "
                 f"→ {args.judge_url}  model={args.judge_model}"
             )
         else:
             if args.domain == "code":
                 reward_funcs.append(check_code_heuristic)
-                logger.info("🔧 Code rewards: heuristic fallback "
-                            "(pass --judge_model to enable LLM judge)")
+                logger.info(
+                    "�� Code rewards: heuristic fallback "
+                    "(pass --judge_model to enable LLM judge)"
+                )
             else:
-                logger.info("💬 General rewards: format only "
-                            "(pass --judge_model to enable LLM judge)")
+                logger.info(
+                    "�� General rewards: format only "
+                    "(pass --judge_model to enable LLM judge)"
+                )
 
     return reward_funcs, judge

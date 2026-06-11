@@ -2,7 +2,7 @@
 """
 hmlcore/calibration.py
 ======================
-Shared calibration-sample builder for REAP (moe.py) and ShortGPT (dense_pruner.py).
+Shared calibration-sample builder for REAP (moe.py) and Bonsai/DLP (dense_pruner.py).
 
 Inspired by the two-lane calibration pattern in moe-compress
 (github.com/0xSero/moe-compress): choose samples by a strategy that matches
@@ -17,7 +17,7 @@ build_calibration_samples(dataset, num_samples, *, strategy, max_tokens_per_samp
 Selection strategies
 --------------------
 "longest"  Descending token count.  More hidden-state transitions per
-           sample → more reliable ShortGPT/REAP scores.  Recommended default.
+           sample → more reliable Bonsai-DLP/REAP scores.  Recommended default.
 "shortest" Ascending token count.  Diverse short-turn coverage.
 "random"   Reproducible shuffle (seed-controlled).
 "first"    Natural dataset order — previous default behaviour.

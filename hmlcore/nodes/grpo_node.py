@@ -28,8 +28,15 @@ logger = logging.getLogger(__name__)
 
 class GRPONode(BaseNode):
     NAME = "GRPONode"
-    INPUT_KEYS = ("model", "tokenizer", "dataset", "args",
-                  "grpo_dir", "grpo_checkpoint", "is_multimodal")
+    INPUT_KEYS = (
+        "model",
+        "tokenizer",
+        "dataset",
+        "args",
+        "grpo_dir",
+        "grpo_checkpoint",
+        "is_multimodal",
+    )
     OUTPUT_KEYS = ()
 
     def should_run(self, ctx: NodeContext) -> bool:
@@ -39,19 +46,20 @@ class GRPONode(BaseNode):
         if getattr(args, "prune_only", False):
             logger.info("⏭️  GRPO skipped (--prune_only).")
             return False
-        # VLM models are now supported in GRPO if the environment handles vision tokens.
-        # We only log a warning to ensure the user knows they need specialized rewards.
         if ctx.get("is_multimodal", False):
-            logger.info("🎨 VLM detected — running multimodal GRPO.")
+            logger.info(
+                "�� VLM model detected (%s). Running GRPO using 3D-RoPE collapse guard fallback images.",
+                type(ctx.get("model")).__name__,
+            )
         return True
 
     def run(self, ctx: NodeContext) -> None:
         self._require(ctx, "model", "tokenizer", "dataset", "args", "grpo_dir")
-        args            = ctx["args"]
-        model           = ctx["model"]
-        tokenizer       = ctx["tokenizer"]
-        dataset         = ctx["dataset"]
-        grpo_dir        = ctx["grpo_dir"]
+        args = ctx["args"]
+        model = ctx["model"]
+        tokenizer = ctx["tokenizer"]
+        dataset = ctx["dataset"]
+        grpo_dir = ctx["grpo_dir"]
         grpo_checkpoint = ctx.get("grpo_checkpoint")
 
         # Guard: need enough examples for GRPO rollouts
@@ -66,8 +74,9 @@ class GRPONode(BaseNode):
         # ── Unsloth compatibility: ensure warnings_issued exists on base model ─
         # Unsloth sets this during SFT; when SFT is skipped it may be absent.
         try:
-            base = getattr(getattr(model, "base_model", None), "model", None) \
-                   or getattr(model, "model", model)
+            base = getattr(
+                getattr(model, "base_model", None), "model", None
+            ) or getattr(model, "model", model)
             if not hasattr(base, "warnings_issued"):
                 base.warnings_issued = {}
         except Exception:
@@ -75,15 +84,17 @@ class GRPONode(BaseNode):
 
         # ── Reward functions ──────────────────────────────────────────────────
         from hmlcore.rewards import build_reward_functions
+
         reward_funcs, judge = build_reward_functions(args, tokenizer)
 
         # ── GRPO training ─────────────────────────────────────────────────────
         from hmlcore.trainer import run_grpo
 
-        logger.info("🎯 Starting Step 2: GRPO RL (%s domain) ...", args.domain)
+        logger.info("�� Starting Step 2: GRPO RL (%s domain) ...", args.domain)
         try:
-            run_grpo(model, tokenizer, dataset, reward_funcs, args,
-                     grpo_dir, grpo_checkpoint)
+            run_grpo(
+                model, tokenizer, dataset, reward_funcs, args, grpo_dir, grpo_checkpoint
+            )
         finally:
             if judge is not None:
                 logger.info(judge.cache_stats())

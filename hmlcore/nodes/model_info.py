@@ -1,4 +1,4 @@
-# By dreamraster Â· dreaMSCend
+# By dreamraster · dreaMSCend
 """
 hmlcore/nodes/model_info.py
 ============================

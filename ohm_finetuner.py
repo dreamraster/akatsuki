@@ -1,5 +1,4 @@
 # By dreamraster · dreaMSCend
-#!/usr/bin/env python3
 """
 ohm_finetuner.py — GRPO-based Distillation for Specialized Domains
 
@@ -9,8 +8,9 @@ All logic lives in hmlcore/nodes/:
     InputNode   — load model / tokenizer / dataset + multimodal detection
     SFTNode     — SFT formatting warm-up
     GRPONode    — GRPO reinforcement learning
-    PrunerNode  — REAP MoE expert pruning (MoE models only)
+    PrunerNode  — REAP (MoE) or Bonsai/DLP (Dense) pruning stage
     OutputNode  — merge / quantize / save (HF or GGUF)
+    PRISMDQNode — PRISM Dynamic Quantization recipe (post-save, optional)
 
 Usage:
     python ohm_finetuner.py \\
@@ -32,6 +32,14 @@ Usage:
 
     # Resume
     python ohm_finetuner.py ... --resume
+
+    # PRISM Dynamic Quantization recipe (no training, just analysis + recipe)
+    python ohm_finetuner.py ... --merge --quantize bf16 --prism_dq --target_bpw 3.5
+
+    # PRISM-DQ with auto llama-quantize invocation
+    python ohm_finetuner.py ... --merge --quantize bf16 --prism_dq --target_bpw 3.5 \\
+        --dq_llama_path D:/llama.cpp/build/bin/llama-quantize.exe \\
+        --dq_input_gguf ./build/finale/model_f16.gguf
 """
 
 import logging
@@ -58,7 +66,8 @@ def main() -> None:
     from hmlcore.config import build_parser, apply_args
     from hmlcore.nodes import (
         GraphRunner, make_context,
-        InputNode, SFTNode, GRPONode, PrunerNode, OutputNode,
+        InputNode, ShortcutHeadNode, SFTNode, ShortcutFreezeNode,
+        GRPONode, PrunerNode, OutputNode, PRISMDQNode,
     )
     from hmlcore.nodes.base import NodeError
 
@@ -66,21 +75,34 @@ def main() -> None:
     args   = parser.parse_args()
     apply_args(args)
 
-    runner = GraphRunner([
-        InputNode(),
+    nodes = [InputNode()]
+    if getattr(args, "xtoken_enabled", False):
+        from hmlcore.xtoken import create_xtoken_pipeline
+        nodes.extend(create_xtoken_pipeline(
+            teacher_model_path=args.teacher_model,
+            projection_type=args.xtoken_projection,
+            hidden_dim=args.xtoken_hidden_dim,
+            num_epochs=args.xtoken_epochs,
+        ))
+    nodes.extend([
+        ShortcutHeadNode(),  # attach shortcut heads (skipped if --shortcut_heads not set)
         SFTNode(),
+        ShortcutFreezeNode(),  # freeze/unfreeze heads for GRPO (skipped if no manager)
         GRPONode(),
         PrunerNode(),
         OutputNode(),
+        PRISMDQNode(),   # Runs only when --prism_dq is set; no-ops otherwise
     ])
+
+    runner = GraphRunner(nodes)
 
     try:
         ctx = runner.run(make_context(args))
     except NodeError as exc:
-        logger.error("💥 Pipeline failed: %s", exc)
+        logger.error("�� Pipeline failed: %s", exc)
         sys.exit(1)
 
-    logger.info("🎉 Done. Output: %s", ctx.get("finale_dir", args.output_dir))
+    logger.info("�� Done. Output: %s", ctx.get("finale_dir", args.output_dir))
 
 
 if __name__ == "__main__":
